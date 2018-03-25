@@ -39,21 +39,6 @@ const uint8_t MD_DEVICE_TYPE = 0x02;
 
 const uint8_t MD_END = 0x00;
 
-//static uint8_t service1_uuid[]    = {0x71, 0x3D, 0, 0, 0x50, 0x3E, 0x4C, 0x75, 0xBA, 0x94, 0x31, 0x48, 0xF1, 0x8D, 0x94, 0x1E};
-//static uint8_t service1_chars1[]  = {0x71, 0x3D, 0, 2, 0x50, 0x3E, 0x4C, 0x75, 0xBA, 0x94, 0x31, 0x48, 0xF1, 0x8D, 0x94, 0x1E};
-//static uint8_t service1_chars2[]  = {0x71, 0x3D, 0, 3, 0x50, 0x3E, 0x4C, 0x75, 0xBA, 0x94, 0x31, 0x48, 0xF1, 0x8D, 0x94, 0x1E};
-//static uint8_t service1_chars3[]  = {0x71, 0x3D, 0, 4, 0x50, 0x3E, 0x4C, 0x75, 0xBA, 0x94, 0x31, 0x48, 0xF1, 0x8D, 0x94, 0x1E};
-
-UUID service_uuid(0x180D);
-UUID chars_uuid1(0x2A37);
-//UUID chars_uuid2(service1_chars2);
-//UUID chars_uuid3(service1_chars3);
-
-static uint8_t device_is_hrm = 0;
-static uint8_t device_is_simple_peripheral = 0;
-
-// When found the match descriptor, set 1.
-static uint8_t descriptor_is_found = 0;
 // to write:
 //  flight_params('fa0a'), command('fa0b'), emergency('fa0c')
 // notify (needs to subscribe as handshake):
@@ -102,6 +87,8 @@ static uint8_t steps_flight_params; // step count for fa0a
 static uint8_t steps_command;       // step count for fa0b
 static uint8_t steps_emergency;     // step count for fa0c
 
+static uint32_t takeoffMillis;
+
 static void scanCallBack(const Gap::AdvertisementCallbackParams_t *params);
 static void discoveredServiceCallBack(const DiscoveredService *service);
 static void discoveredCharacteristicCallBack(const DiscoveredCharacteristic *chars);
@@ -138,10 +125,7 @@ uint32_t ble_advdata_parser(uint8_t type, uint8_t advdata_len, uint8_t *p_advdat
 }
 
 void startDiscovery(uint16_t handle) {
-  if(device_is_hrm)
-    ble.gattClient().launchServiceDiscovery(handle, discoveredServiceCallBack, discoveredCharacteristicCallBack, service_uuid, chars_uuid1);
-  if(device_is_simple_peripheral)
-    ble.gattClient().launchServiceDiscovery(handle, discoveredServiceCallBack, discoveredCharacteristicCallBack);
+  ble.gattClient().launchServiceDiscovery(handle, discoveredServiceCallBack, discoveredCharacteristicCallBack);
 }
 
 /**
@@ -179,12 +163,6 @@ static void scanCallBack(const Gap::AdvertisementCallbackParams_t *params) {
     Serial.println(len, DEC);
     Serial.print("Short name is : ");
     Serial.println((const char*)adv_name);
-    if( memcmp("TXRX", adv_name, 4) == 0x00 ) {
-      Serial.println("Got device, stop scan ");
-      ble.stopScan();
-      device_is_simple_peripheral = 1;
-      ble.connect(params->peerAddr, BLEProtocol::AddressType::RANDOM_STATIC, NULL, NULL);
-    }
   }
   else if( NRF_SUCCESS == ble_advdata_parser(BLE_GAP_AD_TYPE_COMPLETE_LOCAL_NAME, params->advertisingDataLen, (uint8_t *)params->advertisingData, &len, adv_name) ) {
     Serial.print("Complete name len : ");
@@ -192,15 +170,9 @@ static void scanCallBack(const Gap::AdvertisementCallbackParams_t *params) {
     Serial.print("Complete name is : ");
     Serial.println((const char*)adv_name);
 
-    if(memcmp("Nordic_HRM", adv_name, 10) == 0x00) {
+    if( memcmp("Mambo_", adv_name, 6) == 0x00 ) {
       Serial.println("Got device, stop scan ");
       ble.stopScan();
-      device_is_hrm = 1;
-      ble.connect(params->peerAddr, BLEProtocol::AddressType::RANDOM_STATIC, NULL, NULL);
-    } else if( memcmp("Mambo_", adv_name, 6) == 0x00 ) {
-      Serial.println("Got device, stop scan ");
-      ble.stopScan();
-      device_is_simple_peripheral = 1;
       ble.connect(params->peerAddr, BLEProtocol::AddressType::RANDOM_STATIC, NULL, NULL);
     }
   }
@@ -225,10 +197,7 @@ void connectionCallBack( const Gap::ConnectionCallbackParams_t *params ) {
 
 void disconnectionCallBack(const Gap::DisconnectionCallbackParams_t *params) {
   Serial.println("Disconnected, start to scanning");
-  device_is_simple_peripheral = 0;
-  device_is_hrm = 0;
-  descriptor_is_found = 0;
-  ble.startScan(scanCallBack);
+  //ble.startScan(scanCallBack);
 }
 
 static void discoveredServiceCallBack(const DiscoveredService *service) {
@@ -331,8 +300,18 @@ static void discoveredCharsDescriptorCallBack(const CharacteristicDescriptorDisc
 }
 
 static void takeoff() {
+  Serial.println("takeoff");
   uint8_t buf[] = {
     MDDT_DATA, ++steps_command, MD_DEVICE_TYPE, MDC_PILOTING, MDM_TAKEOFF, MD_END
+  };
+  ble.gattClient().write(GattClient::GATT_OP_WRITE_CMD, dchars[IDX_COMMAND].getConnectionHandle(), dchars[IDX_COMMAND].getValueHandle(), sizeof(buf), buf);
+  takeoffMillis = millis();
+}
+
+static void land() {
+  Serial.println("land");
+  uint8_t buf[] = {
+    MDDT_DATA, ++steps_command, MD_DEVICE_TYPE, MDC_PILOTING, MDM_LAND, MD_END
   };
   ble.gattClient().write(GattClient::GATT_OP_WRITE_CMD, dchars[IDX_COMMAND].getConnectionHandle(), dchars[IDX_COMMAND].getValueHandle(), sizeof(buf), buf);
 }
@@ -432,10 +411,13 @@ void hvxCallBack(const GattHVXCallbackParams *params) {
   Serial.println("GattClient notify call back ");
   Serial.print("The handle : ");
   Serial.println(params->handle, HEX);
+  // BC: flight_status(fb0e)
+  // BF: battery(fb0f)
   Serial.print("The len : ");
   Serial.println(params->len, DEC);
   for(unsigned char index=0; index<params->len; index++) {
     Serial.print(params->data[index], HEX);
+    Serial.print(" ");
   }
   Serial.println("");
 }
@@ -459,5 +441,9 @@ void setup() {
 }
 
 void loop() {
+  if (takeoffMillis > 0 && millis() - takeoffMillis > 2000) {
+    takeoffMillis = 0;
+    land();
+  }
   ble.waitForEvent();
 }
