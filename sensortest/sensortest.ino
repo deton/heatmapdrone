@@ -66,10 +66,15 @@ void periodicCallback() {
 void setup() {
   Serial.begin(9600);
   Serial.println("Nordic_HRM Demo ");
+
   if (! vcnl.begin()){
     Serial.println("Sensor not found :(");
     while (1);
   }
+  // disable proximity sensing. use ambient sensing only
+  vcnl.setLEDcurrent(0);
+  vcnl.setFrequency(VCNL4010_1_95);
+
   // Init timer task
   ticker_task1.attach(periodicCallback, 1);
   // Init ble
@@ -104,7 +109,7 @@ void loop() {
     prevMillis = millis();
     uint16_t ambient = vcnl.readAmbient();
     Serial.print("Ambient: "); Serial.println(ambient);
-    Serial.print("Proximity: "); Serial.println(vcnl.readProximity());
+    //Serial.print("Proximity: "); Serial.println(vcnl.readProximity());
     // 75:65535 = hrm:ambient
     hrmCounter = ambient * 75.0 / 65535.0 + 100;
     Serial.print("hrm value: "); Serial.println(hrmCounter);
