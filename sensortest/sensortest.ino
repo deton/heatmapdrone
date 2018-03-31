@@ -19,8 +19,11 @@
  */
 #include <nRF5x_BLE_API.h>
 #include "Adafruit_VCNL4010.h"
+// https://github.com/pololu/vl53l0x-arduino
+#include <VL53L0X.h>
 
 Adafruit_VCNL4010 vcnl;
+VL53L0X tof;
 
 #define DEVICE_NAME       "Nordic_HRM"
 
@@ -66,6 +69,7 @@ void periodicCallback() {
 void setup() {
   Serial.begin(9600);
   Serial.println("Nordic_HRM Demo ");
+  Wire.begin();
 
   if (! vcnl.begin()){
     Serial.println("Sensor not found :(");
@@ -74,6 +78,10 @@ void setup() {
   // disable proximity sensing. use ambient sensing only
   vcnl.setLEDcurrent(0);
   vcnl.setFrequency(VCNL4010_1_95);
+
+  tof.init();
+  tof.setTimeout(100);
+  tof.setMeasurementTimingBudget(20000);
 
   // Init timer task
   ticker_task1.attach(periodicCallback, 1);
@@ -111,8 +119,15 @@ void loop() {
     Serial.print("Ambient: "); Serial.println(ambient);
     //Serial.print("Proximity: "); Serial.println(vcnl.readProximity());
     // 75:65535 = hrm:ambient
-    hrmCounter = ambient * 75.0 / 65535.0 + 100;
-    Serial.print("hrm value: "); Serial.println(hrmCounter);
+    //hrmCounter = ambient * 75.0 / 65535.0 + 100;
+    //Serial.print("hrm value: "); Serial.println(hrmCounter);
+
+    uint16_t mm = tof.readRangeSingleMillimeters();
+    if (!tof.timeoutOccurred()) {
+      Serial.print("up ToF mm: "); Serial.println(mm);
+      hrmCounter = mm * 75.0 / 8190.0 + 100;
+      Serial.print("hrm value: "); Serial.println(hrmCounter);
+    }
   }
 }
 
