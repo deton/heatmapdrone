@@ -23,8 +23,12 @@
 #include <VL53L0X.h>
 #include <FaBoTemperature_ADT7410.h>
 
+const uint8_t XSHUT_PIN = D4;
+const uint8_t TOF_UP_NEWADDR = 42; // TOF_FRONT = 41 (default)
+
 Adafruit_VCNL4010 vcnl;
-VL53L0X tof;
+VL53L0X tof_up;
+VL53L0X tof_front;
 FaBoTemperature adt7410;
 
 #define DEVICE_NAME       "Nordic_HRM"
@@ -69,6 +73,9 @@ void periodicCallback() {
 }
 
 void setup() {
+  // https://forum.pololu.com/t/vl53l0x-maximum-sensors-on-i2c-arduino-bus/10845/7
+  pinMode(XSHUT_PIN, OUTPUT); // LOW: shutdown tof_front
+
   Serial.begin(9600);
   Serial.println("Nordic_HRM Demo ");
   Wire.begin();
@@ -81,9 +88,16 @@ void setup() {
   vcnl.setLEDcurrent(0);
   vcnl.setFrequency(VCNL4010_1_95);
 
-  tof.init();
-  tof.setTimeout(100);
-  tof.setMeasurementTimingBudget(20000);
+  // change address to use multiple VL53L0X
+  tof_up.setAddress(TOF_UP_NEWADDR);
+  pinMode(XSHUT_PIN, INPUT); // HIGH: boot tof_front. default addr
+  delay(10);
+  tof_up.init();
+  tof_up.setTimeout(300);
+  tof_up.setMeasurementTimingBudget(20000);
+  tof_front.init();
+  tof_front.setTimeout(300);
+  tof_front.setMeasurementTimingBudget(20000);
 
   adt7410.begin();
 
@@ -126,11 +140,16 @@ void loop() {
     //hrmCounter = ambient * 75.0 / 65535.0 + 100;
     //Serial.print("hrm value: "); Serial.println(hrmCounter);
 
-    uint16_t mm = tof.readRangeSingleMillimeters();
-    if (!tof.timeoutOccurred()) {
-      Serial.print("up ToF mm: "); Serial.println(mm);
-      //hrmCounter = mm * 75.0 / 8190.0 + 100;
+    uint16_t mm_up = tof_up.readRangeSingleMillimeters();
+    if (!tof_up.timeoutOccurred()) {
+      Serial.print("up ToF mm: "); Serial.println(mm_up);
+      //hrmCounter = mm_up * 75.0 / 8190.0 + 100;
       //Serial.print("hrm value: "); Serial.println(hrmCounter);
+    }
+
+    uint16_t mm_front = tof_front.readRangeSingleMillimeters();
+    if (!tof_front.timeoutOccurred()) {
+      Serial.print("front ToF mm: "); Serial.println(mm_front);
     }
 
     float temp = adt7410.readTemperature();
