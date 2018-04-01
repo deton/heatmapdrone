@@ -21,9 +21,11 @@
 #include "Adafruit_VCNL4010.h"
 // https://github.com/pololu/vl53l0x-arduino
 #include <VL53L0X.h>
+#include <FaBoTemperature_ADT7410.h>
 
 Adafruit_VCNL4010 vcnl;
 VL53L0X tof;
+FaBoTemperature adt7410;
 
 #define DEVICE_NAME       "Nordic_HRM"
 
@@ -83,6 +85,8 @@ void setup() {
   tof.setTimeout(100);
   tof.setMeasurementTimingBudget(20000);
 
+  adt7410.begin();
+
   // Init timer task
   ticker_task1.attach(periodicCallback, 1);
   // Init ble
@@ -125,9 +129,17 @@ void loop() {
     uint16_t mm = tof.readRangeSingleMillimeters();
     if (!tof.timeoutOccurred()) {
       Serial.print("up ToF mm: "); Serial.println(mm);
-      hrmCounter = mm * 75.0 / 8190.0 + 100;
-      Serial.print("hrm value: "); Serial.println(hrmCounter);
+      //hrmCounter = mm * 75.0 / 8190.0 + 100;
+      //Serial.print("hrm value: "); Serial.println(hrmCounter);
     }
+
+    float temp = adt7410.readTemperature();
+    Serial.print("temperature: "); Serial.println(temp, 1);
+    // 75:255 = hrm:(temp+55) // temp:[-55, 150]
+    hrmCounter = (temp + 55) * 75.0 / 255.0 + 100;
+    Serial.print("hrm value: "); Serial.println(hrmCounter);
+
+    Serial.print("sensing ms: "); Serial.println(millis() - prevMillis);
   }
 }
 
