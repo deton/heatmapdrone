@@ -2,6 +2,7 @@
 
 // cf.
 // https://github.com/Mechazawa/minidrone-js
+// https://github.com/algolia/pdrone
 // https://github.com/fetherston/npm-parrot-minidrone
 // https://github.com/amymcgovern/pymambo
 // https://github.com/voodootikigod/node-rolling-spider
@@ -9,6 +10,7 @@
 BLE           ble;
 
 // MD_CLASSES
+// https://github.com/Parrot-Developers/arsdk-xml/blob/master/xml/minidrone.xml
 const uint8_t MDC_PILOTING = 0x00;
 const uint8_t MDC_SPEED_SETTINGS = 0x01;
 const uint8_t MDC_ANIMATION = 0x04;
@@ -19,6 +21,7 @@ const uint8_t MDC_NAVIGATION_DATA_STATE = 0x18;
 // MD_METHODS
 const uint8_t MDM_TRIM = 0x00;
 const uint8_t MDM_TAKEOFF = 0x01;
+const uint8_t MDM_PCMD = 0x02;
 const uint8_t MDM_LAND = 0x03;
 const uint8_t MDM_EMERGENCY = 0x04;
 const uint8_t MDM_PICTURE = 0x01;
@@ -85,9 +88,11 @@ static int discovering_char_desc;
 static int subscribing_char_desc;
 static uint8_t steps_flight_params; // step count for fa0a
 static uint8_t steps_command;       // step count for fa0b
-static uint8_t steps_emergency;     // step count for fa0c
+//static uint8_t steps_emergency;     // step count for fa0c
 
 static uint32_t takeoffMillis;
+static uint32_t lastWriteMillis;
+static int testForward = 1;
 
 static void scanCallBack(const Gap::AdvertisementCallbackParams_t *params);
 static void discoveredServiceCallBack(const DiscoveredService *service);
@@ -196,7 +201,8 @@ void connectionCallBack( const Gap::ConnectionCallbackParams_t *params ) {
 }
 
 void disconnectionCallBack(const Gap::DisconnectionCallbackParams_t *params) {
-  Serial.println("Disconnected, start to scanning");
+  Serial.println("Disconnected"); //, start to scanning");
+  lastWriteMillis = takeoffMillis = 0;
   //ble.startScan(scanCallBack);
 }
 
@@ -305,7 +311,7 @@ static void takeoff() {
     MDDT_DATA, ++steps_command, MD_DEVICE_TYPE, MDC_PILOTING, MDM_TAKEOFF, MD_END
   };
   ble.gattClient().write(GattClient::GATT_OP_WRITE_CMD, dchars[IDX_COMMAND].getConnectionHandle(), dchars[IDX_COMMAND].getValueHandle(), sizeof(buf), buf);
-  takeoffMillis = millis();
+  lastWriteMillis = takeoffMillis = millis();
 }
 
 static void land() {
@@ -314,6 +320,36 @@ static void land() {
     MDDT_DATA, ++steps_command, MD_DEVICE_TYPE, MDC_PILOTING, MDM_LAND, MD_END
   };
   ble.gattClient().write(GattClient::GATT_OP_WRITE_CMD, dchars[IDX_COMMAND].getConnectionHandle(), dchars[IDX_COMMAND].getValueHandle(), sizeof(buf), buf);
+  lastWriteMillis = millis();
+}
+
+static void fly(int8_t roll, int8_t pitch, int8_t yaw, int8_t vertical) {
+  Serial.print("fly:");
+  Serial.print(roll); Serial.print(",");
+  Serial.print(pitch); Serial.print(",");
+  Serial.print(yaw); Serial.print(",");
+  Serial.print(vertical); Serial.println();
+  uint8_t flag = 1; // Boolean flag to activate roll/pitch movement
+  uint8_t buf[] = {
+    MDDT_DATA, ++steps_flight_params, MD_DEVICE_TYPE, MDC_PILOTING, MDM_PCMD, MD_END,
+    flag, (uint8_t)roll, (uint8_t)pitch, (uint8_t)yaw, (uint8_t)vertical, 0, 0, 0, 0
+  };
+  ble.gattClient().write(GattClient::GATT_OP_WRITE_CMD, dchars[IDX_FLIGHT_PARAMS].getConnectionHandle(), dchars[IDX_FLIGHT_PARAMS].getValueHandle(), sizeof(buf), buf);
+  lastWriteMillis = millis();
+}
+
+static void forward() {
+  fly(0, 100, 0, 0);
+}
+
+// write some command to avoid disconnect after 5 seconds of inactivity
+static void ping() {
+  Serial.println("ping");
+  uint8_t buf[] = {
+    MDDT_DATA, ++steps_command, MD_DEVICE_TYPE, MDC_NAVIGATION_DATA_STATE, MDM_DRONE_POSITION, MD_END
+  };
+  ble.gattClient().write(GattClient::GATT_OP_WRITE_CMD, dchars[IDX_COMMAND].getConnectionHandle(), dchars[IDX_COMMAND].getValueHandle(), sizeof(buf), buf);
+  lastWriteMillis = millis();
 }
 
 static int handshake() {
@@ -441,9 +477,18 @@ void setup() {
 }
 
 void loop() {
-  if (takeoffMillis > 0 && millis() - takeoffMillis > 2000) {
+  if (testForward > 0 && takeoffMillis > 0 && millis() - takeoffMillis > 2000) {
+    forward();
+    testForward--;
+  }
+  if (takeoffMillis > 0 && millis() - takeoffMillis > 10000) {
     takeoffMillis = 0;
     land();
+  }
+  // avoid disconnect after 5 seconds of inactivity
+  // (lastWriteMillis may be updated in forward()/land())
+  if (lastWriteMillis > 0 && millis() - lastWriteMillis > 4000) {
+    ping();
   }
   ble.waitForEvent();
 }
