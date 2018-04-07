@@ -1,5 +1,22 @@
 #include <nRF5x_BLE_API.h>
 
+#include "Adafruit_VCNL4010.h"
+// https://github.com/pololu/vl53l0x-arduino
+#include <VL53L0X.h>
+#include <FaBoTemperature_ADT7410.h>
+
+const uint8_t XSHUT_PIN = D4;
+const uint8_t TOF_UP_NEWADDR = 42; // TOF_FRONT = 41 (default)
+
+Adafruit_VCNL4010 vcnl;
+VL53L0X tof_up;
+VL53L0X tof_front;
+FaBoTemperature adt7410;
+
+static uint32_t prevSensingMillis = 0;
+static uint32_t prevTemperatureMillis = 0;
+
+
 // cf.
 // https://github.com/Mechazawa/minidrone-js
 // https://github.com/algolia/pdrone
@@ -458,8 +475,37 @@ void hvxCallBack(const GattHVXCallbackParams *params) {
   Serial.println("");
 }
 
+void setupSensors() {
+  // https://forum.pololu.com/t/vl53l0x-maximum-sensors-on-i2c-arduino-bus/10845/7
+  pinMode(XSHUT_PIN, OUTPUT); // LOW: shutdown tof_front
+
+  Wire.begin();
+
+  if (! vcnl.begin()){
+    Serial.println("Sensor not found :(");
+    while (1);
+  }
+  // disable proximity sensing. use ambient sensing only
+  vcnl.setLEDcurrent(0);
+  vcnl.setFrequency(VCNL4010_1_95);
+
+  // change address to use multiple VL53L0X
+  tof_up.setAddress(TOF_UP_NEWADDR);
+  pinMode(XSHUT_PIN, INPUT); // HIGH: boot tof_front. default addr
+  delay(10);
+  tof_up.init();
+  tof_up.setTimeout(300);
+  tof_up.setMeasurementTimingBudget(20000);
+  tof_front.init();
+  tof_front.setTimeout(300);
+  tof_front.setMeasurementTimingBudget(20000);
+
+  adt7410.begin();
+}
+
 void setup() {
   Serial.begin(9600);
+  setupSensors();
 
   ble.init();
   ble.onConnection(connectionCallBack);
@@ -491,4 +537,28 @@ void loop() {
     ping();
   }
   ble.waitForEvent();
+
+  if (millis() - prevSensingMillis > 500) {
+    prevSensingMillis = millis();
+    uint16_t mm_up = tof_up.readRangeSingleMillimeters();
+    if (!tof_up.timeoutOccurred()) {
+      Serial.print("up ToF mm: "); Serial.println(mm_up);
+    }
+
+    uint16_t mm_front = tof_front.readRangeSingleMillimeters();
+    if (!tof_front.timeoutOccurred()) {
+      Serial.print("front ToF mm: "); Serial.println(mm_front);
+    }
+
+    uint16_t ambient = vcnl.readAmbient();
+    Serial.print("Ambient: "); Serial.println(ambient);
+
+    Serial.print("sensing ms: "); Serial.println(millis() - prevSensingMillis);
+  }
+
+  if (millis() - prevTemperatureMillis > 2000) {
+    prevTemperatureMillis = millis();
+    float temp = adt7410.readTemperature();
+    Serial.print("temperature: "); Serial.println(temp, 1);
+  }
 }
