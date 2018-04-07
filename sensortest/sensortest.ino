@@ -143,7 +143,7 @@ void loop() {
     uint16_t mm_up = tof_up.readRangeSingleMillimeters();
     if (!tof_up.timeoutOccurred()) {
       Serial.print("up ToF mm: "); Serial.println(mm_up);
-      //hrmCounter = mm_up * 75.0 / 8190.0 + 100;
+      //hrmCounter = mm_up * 75.0 / 8192.0 + 100;
       //Serial.print("hrm value: "); Serial.println(hrmCounter);
     }
 
