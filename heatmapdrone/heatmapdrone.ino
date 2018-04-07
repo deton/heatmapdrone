@@ -8,6 +8,9 @@
 const uint8_t XSHUT_PIN = D4;
 const uint8_t TOF_UP_NEWADDR = 42; // TOF_FRONT = 41 (default)
 
+const uint16_t UP_MIN = 300; // 30cm from ceiling
+const uint16_t UP_MAX = 1000; // 1m from ceiling
+
 Adafruit_VCNL4010 vcnl;
 VL53L0X tof_up;
 VL53L0X tof_front;
@@ -538,22 +541,27 @@ void loop() {
   }
   ble.waitForEvent();
 
-  if (millis() - prevSensingMillis > 500) {
+  if (millis() - prevSensingMillis > 1000) {
     prevSensingMillis = millis();
     uint16_t mm_up = tof_up.readRangeSingleMillimeters();
+    uint16_t mm_front = tof_front.readRangeSingleMillimeters();
+    uint16_t ambient = vcnl.readAmbient();
+    //Serial.print("sensing ms: "); Serial.println(millis() - prevSensingMillis); // ex.164
+
     if (!tof_up.timeoutOccurred()) {
       Serial.print("up ToF mm: "); Serial.println(mm_up);
+      if (takeoffMillis > 0) {
+        if (mm_up > UP_MAX) {
+          fly(0, 0, 0, 50);
+        } else if (mm_up < UP_MIN) {
+          fly(0, 0, 0, -50);
+        }
+      }
     }
-
-    uint16_t mm_front = tof_front.readRangeSingleMillimeters();
     if (!tof_front.timeoutOccurred()) {
       Serial.print("front ToF mm: "); Serial.println(mm_front);
     }
-
-    uint16_t ambient = vcnl.readAmbient();
     Serial.print("Ambient: "); Serial.println(ambient);
-
-    Serial.print("sensing ms: "); Serial.println(millis() - prevSensingMillis);
   }
 
   if (millis() - prevTemperatureMillis > 2000) {
