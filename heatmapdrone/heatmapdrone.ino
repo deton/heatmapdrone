@@ -616,9 +616,9 @@ void setup() {
 
 void loop() {
   int8_t req_vertical_movement = 0;
+  int8_t req_forward = 0;
   int16_t req_turn = 0;
   enum PILOT_STATE req_pilotState = PS_NONE;
-  bool req_forward = false;
   bool req_land = false;
 
   if (millis() - prevSensingMillis > 1000) {
@@ -640,7 +640,7 @@ void loop() {
       Serial.print("front ToF mm: "); Serial.println(mm_front); // from wall
       if (isFlying()) {
         if (mm_front > FRONT_MIN) {
-          req_forward = true;
+          req_forward = 100;
           prevNearWall = 0;
         } else { // too near from wall
           if (prevNearWall == 0) {
@@ -677,10 +677,8 @@ void loop() {
         turn_degrees(req_turn);
         pilotState = req_pilotState;
         prevNearWall = 0;
-      } else if (req_vertical_movement) {
-        fly(0, 0, 0, req_vertical_movement);
-      } else if (req_forward) {
-        forward();
+      } else {
+        fly(0, req_forward, 0, req_vertical_movement);
       }
     }
   }
