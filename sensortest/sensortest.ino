@@ -134,6 +134,9 @@ void loop() {
   if (millis() - prevMillis > 1000) {
     prevMillis = millis();
     uint16_t ambient = vcnl.readAmbient();
+
+    Serial.print("sensing ms: "); Serial.println(millis() - prevMillis); // ex. 117 ms
+
     Serial.print("Ambient: "); Serial.println(ambient);
     //Serial.print("Proximity: "); Serial.println(vcnl.readProximity());
     // 75:65535 = hrm:ambient
@@ -149,6 +152,10 @@ void loop() {
 
     uint16_t mm_front = tof_front.readRangeSingleMillimeters();
     if (!tof_front.timeoutOccurred()) {
+      const uint16_t FRONT_MIN = 600;
+      if (mm_front < FRONT_MIN) {
+        Serial.print("XXX ");
+      }
       Serial.print("front ToF mm: "); Serial.println(mm_front);
     }
 
@@ -157,8 +164,6 @@ void loop() {
     // 75:255 = hrm:(temp+55) // temp:[-55, 150]
     hrmCounter = (temp + 55) * 75.0 / 255.0 + 100;
     Serial.print("hrm value: "); Serial.println(hrmCounter);
-
-    Serial.print("sensing ms: "); Serial.println(millis() - prevMillis);
   }
 }
 

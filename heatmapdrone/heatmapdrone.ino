@@ -5,11 +5,40 @@
 #include <VL53L0X.h>
 #include <FaBoTemperature_ADT7410.h>
 
+// pilot plan
+//
+// floor model:
+//
+//      [north]
+//  +-------------+  wall
+//  |             |
+//  | == == == == |  ceiling light line
+//  |             |
+//  | == == == == |
+//  |             |
+//  +-------------+  wall
+//      [south]
+// 
+// pilot state:
+//  +-------------+
+//  |           ^ | PS_E2W
+//  | == ==>== == | PS_EAST
+//  | ^           | PS_W2E
+//  | == ==<== == | PS_WEST
+//  |             |
+//  +-------------+
+//
+enum PILOT_STATE {
+  PS_WEST, PS_W2E, PS_EAST, PS_E2W
+} pilotState = PS_WEST;
+
+// sensors
 const uint8_t XSHUT_PIN = D4;
 const uint8_t TOF_UP_NEWADDR = 42; // TOF_FRONT = 41 (default)
 
 const uint16_t UP_MIN = 300; // 30cm from ceiling
 const uint16_t UP_MAX = 1000; // 1m from ceiling
+const uint16_t FRONT_MIN = 1000; // 1m from wall
 
 Adafruit_VCNL4010 vcnl;
 VL53L0X tof_up;
@@ -17,9 +46,11 @@ VL53L0X tof_front;
 FaBoTemperature adt7410;
 
 static uint32_t prevSensingMillis = 0;
+static uint32_t prevNearWall = 0;
 static uint32_t prevTemperatureMillis = 0;
 
 
+// BLE and minidrone
 // cf.
 // https://github.com/Mechazawa/minidrone-js
 // https://github.com/algolia/pdrone
@@ -46,6 +77,7 @@ const uint8_t MDM_LAND = 0x03;
 const uint8_t MDM_EMERGENCY = 0x04;
 const uint8_t MDM_PICTURE = 0x01;
 const uint8_t MDM_FLIP = 0x00;
+const uint8_t MDM_CAP = 0x01;
 const uint8_t MDM_MAX_ALTITUDE = 0x00;
 const uint8_t MDM_MAX_TILT = 0x01;
 const uint8_t MDM_MAX_VERTICAL_SPEED = 0x00;
@@ -112,7 +144,6 @@ static uint8_t steps_command;       // step count for fa0b
 
 static uint32_t takeoffMillis;
 static uint32_t lastWriteMillis;
-static int testForward = 1;
 
 static void scanCallBack(const Gap::AdvertisementCallbackParams_t *params);
 static void discoveredServiceCallBack(const DiscoveredService *service);
@@ -348,7 +379,7 @@ static void fly(int8_t roll, int8_t pitch, int8_t yaw, int8_t vertical) {
   Serial.print(roll); Serial.print(",");
   Serial.print(pitch); Serial.print(",");
   Serial.print(yaw); Serial.print(",");
-  Serial.print(vertical); Serial.println();
+  Serial.println(vertical);
   uint8_t flag = 1; // Boolean flag to activate roll/pitch movement
   uint8_t buf[] = {
     MDDT_DATA, ++steps_flight_params, MD_DEVICE_TYPE, MDC_PILOTING, MDM_PCMD, MD_END,
@@ -360,6 +391,19 @@ static void fly(int8_t roll, int8_t pitch, int8_t yaw, int8_t vertical) {
 
 static void forward() {
   fly(0, 100, 0, 0);
+}
+
+// Turn the mambo the specified number of degrees [-180, 180]
+static void turn_degrees(int16_t degrees) {
+  Serial.print("turn_degrees "); Serial.println(degrees);
+  uint16_t d = (uint16_t)degrees;
+  //uint8_t *p = (uint8_t *)&degrees;
+  uint8_t buf[] = {
+    MDDT_DATA, ++steps_command, MD_DEVICE_TYPE, MDC_ANIMATION, MDM_CAP, MD_END,
+    (uint8_t)(d & 0xFF), (uint8_t)(d >> 8) // little endian
+  };
+  ble.gattClient().write(GattClient::GATT_OP_WRITE_CMD, dchars[IDX_COMMAND].getConnectionHandle(), dchars[IDX_COMMAND].getValueHandle(), sizeof(buf), buf);
+  lastWriteMillis = millis();
 }
 
 // write some command to avoid disconnect after 5 seconds of inactivity
@@ -464,18 +508,21 @@ void onDataReadCallBack(const GattReadCallbackParams *params) {
  *                       params->data : Pointer to the data to write
  */
 void hvxCallBack(const GattHVXCallbackParams *params) {
+  /*
   Serial.println("GattClient notify call back ");
   Serial.print("The handle : ");
   Serial.println(params->handle, HEX);
   // BC: flight_status(fb0e)
   // BF: battery(fb0f)
-  Serial.print("The len : ");
-  Serial.println(params->len, DEC);
+  //Serial.print("The len : ");
+  //Serial.println(params->len, DEC);
   for(unsigned char index=0; index<params->len; index++) {
     Serial.print(params->data[index], HEX);
     Serial.print(" ");
   }
   Serial.println("");
+  // TODO: parse flight status
+  */
 }
 
 void setupSensors() {
@@ -526,42 +573,65 @@ void setup() {
 }
 
 void loop() {
-  if (testForward > 0 && takeoffMillis > 0 && millis() - takeoffMillis > 2000) {
-    forward();
-    testForward--;
-  }
+  /*
   if (takeoffMillis > 0 && millis() - takeoffMillis > 10000) {
     takeoffMillis = 0;
     land();
   }
-  // avoid disconnect after 5 seconds of inactivity
-  // (lastWriteMillis may be updated in forward()/land())
-  if (lastWriteMillis > 0 && millis() - lastWriteMillis > 4000) {
-    ping();
-  }
-  ble.waitForEvent();
+  */
 
   if (millis() - prevSensingMillis > 1000) {
     prevSensingMillis = millis();
     uint16_t mm_up = tof_up.readRangeSingleMillimeters();
     uint16_t mm_front = tof_front.readRangeSingleMillimeters();
     uint16_t ambient = vcnl.readAmbient();
-    //Serial.print("sensing ms: "); Serial.println(millis() - prevSensingMillis); // ex.164
+    //Serial.print("sensing ms: "); Serial.println(millis() - prevSensingMillis); // ex.164ms (readAmbient: 117ms, tof: 23ms)
 
     if (!tof_up.timeoutOccurred()) {
-      Serial.print("up ToF mm: "); Serial.println(mm_up);
+      Serial.print("up ToF mm: "); Serial.println(mm_up); // from ceiling
       if (takeoffMillis > 0) {
-        if (mm_up > UP_MAX) {
-          fly(0, 0, 0, 50);
-        } else if (mm_up < UP_MIN) {
-          fly(0, 0, 0, -50);
+        if (mm_up > UP_MAX) { // too far from ceiling
+          fly(0, 0, 0, 50); // up
+        } else if (mm_up < UP_MIN) { // too near from ceiling
+          fly(0, 0, 0, -50); // down
         }
       }
     }
     if (!tof_front.timeoutOccurred()) {
-      Serial.print("front ToF mm: "); Serial.println(mm_front);
+      Serial.print("front ToF mm: "); Serial.println(mm_front); // from wall
+      if (takeoffMillis > 0) {
+        if (mm_front > FRONT_MIN) {
+          forward();
+          prevNearWall = 0;
+        } else { // too near from wall
+          if (prevNearWall == 0) {
+            ++prevNearWall;
+          } else { // if near wall sensor value continues
+            switch (pilotState) {
+              case PS_WEST:
+                turn_degrees(90);
+                pilotState = PS_W2E;
+                break;
+              case PS_EAST:
+                turn_degrees(-90);
+                pilotState = PS_E2W;
+                break;
+              case PS_W2E:
+              case PS_E2W:
+                if (millis() - takeoffMillis > 3000) {
+                  takeoffMillis = 0;
+                  land();
+                }
+                break;
+            }
+          }
+        }
+      }
     }
     Serial.print("Ambient: "); Serial.println(ambient);
+    // TODO: PS_W2E/E2W: if find light line, turn_degrees()
+    // TODO: PS_WEST/EAST: trace light line
+    // XXX: rewrite to use state machine and sensor events
   }
 
   if (millis() - prevTemperatureMillis > 2000) {
@@ -569,4 +639,12 @@ void loop() {
     float temp = adt7410.readTemperature();
     Serial.print("temperature: "); Serial.println(temp, 1);
   }
+
+  // avoid disconnect after 5 seconds of inactivity
+  // (lastWriteMillis may be updated in forward()/land())
+  if (lastWriteMillis > 0 && millis() - lastWriteMillis > 4000) {
+    ping();
+  }
+
+  ble.waitForEvent();
 }
