@@ -29,7 +29,7 @@
 //  +-------------+
 //
 enum PILOT_STATE {
-  PS_WEST, PS_W2E, PS_EAST, PS_E2W
+  PS_NONE, PS_WEST, PS_W2E, PS_EAST, PS_E2W
 } pilotState = PS_WEST;
 
 // sensors
@@ -615,6 +615,12 @@ void setup() {
 }
 
 void loop() {
+  int8_t req_vertical_movement = 0;
+  int16_t req_turn = 0;
+  enum PILOT_STATE req_pilotState = PS_NONE;
+  bool req_forward = false;
+  bool req_land = false;
+
   if (millis() - prevSensingMillis > 1000) {
     prevSensingMillis = millis();
     uint16_t mm_up = tof_up.readRangeSingleMillimeters();
@@ -624,19 +630,17 @@ void loop() {
 
     if (!tof_up.timeoutOccurred()) {
       Serial.print("up ToF mm: "); Serial.println(mm_up); // from ceiling
-      if (isFlying()) {
-        if (mm_up > UP_MAX) { // too far from ceiling
-          fly(0, 0, 0, 50); // up
-        } else if (mm_up < UP_MIN) { // too near from ceiling
-          fly(0, 0, 0, -50); // down
-        }
+      if (mm_up > UP_MAX) { // too far from ceiling
+        req_vertical_movement = 50; // up
+      } else if (mm_up < UP_MIN) { // too near from ceiling
+        req_vertical_movement = -50; // down
       }
     }
     if (!tof_front.timeoutOccurred()) {
       Serial.print("front ToF mm: "); Serial.println(mm_front); // from wall
       if (isFlying()) {
         if (mm_front > FRONT_MIN) {
-          forward();
+          req_forward = true;
           prevNearWall = 0;
         } else { // too near from wall
           if (prevNearWall == 0) {
@@ -644,16 +648,17 @@ void loop() {
           } else { // if near wall sensor value continues
             switch (pilotState) {
               case PS_WEST:
-                turn_degrees(90);
-                pilotState = PS_W2E;
+                req_turn = 90;
+                req_pilotState = PS_W2E;
                 break;
               case PS_EAST:
-                turn_degrees(-90);
-                pilotState = PS_E2W;
+                req_turn = -90;
+                req_pilotState = PS_E2W;
                 break;
               case PS_W2E:
               case PS_E2W:
-                land();
+              default:
+                req_land = true;
                 break;
             }
           }
@@ -664,6 +669,20 @@ void loop() {
     // TODO: PS_W2E/E2W: if find light line, turn_degrees()
     // TODO: PS_WEST/EAST: trace light line
     // XXX: rewrite to use state machine and sensor events
+
+    if (isFlying()) {
+      if (req_land) { // land is high priority
+        land();
+      } else if (req_turn) {
+        turn_degrees(req_turn);
+        pilotState = req_pilotState;
+        prevNearWall = 0;
+      } else if (req_vertical_movement) {
+        fly(0, 0, 0, req_vertical_movement);
+      } else if (req_forward) {
+        forward();
+      }
+    }
   }
 
   if (millis() - prevTemperatureMillis > 2000) {
