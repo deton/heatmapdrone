@@ -94,6 +94,11 @@ const uint8_t MD_DEVICE_TYPE = 0x02;
 
 const uint8_t MD_END = 0x00;
 
+enum FLYING_STATE {
+  FS_LANDED = 0, FS_TAKINGOFF, FS_HOVERING, FS_FLYING, FS_LANDING,
+  FS_EMERGENCY, FS_ROLLING, FS_INIT
+} flyingState = FS_LANDED;
+
 // to write:
 //  flight_params('fa0a'), command('fa0b'), emergency('fa0c')
 // notify (needs to subscribe as handshake):
@@ -374,6 +379,7 @@ static void land() {
   lastWriteMillis = millis();
 }
 
+// @param roll, pitch, yaw, vertical: [-100, 100]
 static void fly(int8_t roll, int8_t pitch, int8_t yaw, int8_t vertical) {
   Serial.print("fly:");
   Serial.print(roll); Serial.print(",");
@@ -508,21 +514,57 @@ void onDataReadCallBack(const GattReadCallbackParams *params) {
  *                       params->data : Pointer to the data to write
  */
 void hvxCallBack(const GattHVXCallbackParams *params) {
-  /*
-  Serial.println("GattClient notify call back ");
-  Serial.print("The handle : ");
-  Serial.println(params->handle, HEX);
+  if (params->type != BLE_HVX_NOTIFICATION) {
+    return;
+  }
   // BC: flight_status(fb0e)
   // BF: battery(fb0f)
-  //Serial.print("The len : ");
-  //Serial.println(params->len, DEC);
-  for(unsigned char index=0; index<params->len; index++) {
-    Serial.print(params->data[index], HEX);
-    Serial.print(" ");
+  if (params->handle != 0xBC) {
+    return;
   }
-  Serial.println("");
-  // TODO: parse flight status
-  */
+  //   ack_id, packet_id, project_id, myclass_id, cmd_id, extra_id, param
+  //   2, n, 2 (minidrone.xml), 3 (PilotingState), 1 (FlyingStateChanged), 0, e0, e1, e2, e3 (e3e2e1e0: little endian enum(uint16_t): landed=0, takingoff, hovering, flying, landing, emergency, rolling, init)
+  //   2, n, 2 (minidrone.xml), 3 (PilotingState), 2 (AlertStateChanged), 0, e0, e1, e2, e3 (e3e2e1e0: little endian enum(uint16_t): none=0, user, cut_off, critical_battery, low_battery)
+  //   2, n, 2 (minidrone.xml), 3 (PilotingState), 3 (AutoTakeOffModeChanged), 0, m
+  //   2, n, 0 (common.xml), 5 (CommonState), 1 (BatteyStateChanged), 0, p (battery percentage)
+  //   2, n, 0 (common.xml), 1E (RunState), 0 (RunIdChanged), 0, (string)
+  if (params->len < 7) {
+    return;
+  }
+  //static const uint8_t PROJECT_ID_COMMON = 0;
+  static const uint8_t PROJECT_ID_MINIDRONE = 2;
+  if (params->data[2] != PROJECT_ID_MINIDRONE) {
+    return;
+  }
+  //static const uint8_t MYCLASS_ID_COMMONSTATE = 5;
+  //static const uint8_t MYCLASS_ID_RUNSTATE = 30; // 0x1E
+  static const uint8_t MYCLASS_ID_PILOTINGSTATE = 3;
+  if (params->data[3] != MYCLASS_ID_PILOTINGSTATE) {
+    return;
+  }
+  static const uint8_t CMD_ID_FLYINGSTATECHANGED = 1;
+  //static const uint8_t CMD_ID_ALERTSTATECHANGED = 2;
+  //static const uint8_t CMD_ID_AUTOTAKEOFFMODECHANGED = 3;
+  //static const uint8_t CMD_ID_BATTERYSTATECHANGED = 0;
+  //static const uint8_t CMD_ID_RUNIDCHANGED = 0;
+  if (params->data[4] != CMD_ID_FLYINGSTATECHANGED) {
+    return;
+  }
+  flyingState = (enum FLYING_STATE)params->data[6];
+}
+
+bool isFlying() {
+  switch (flyingState) {
+    case FS_TAKINGOFF:
+    case FS_HOVERING:
+    case FS_FLYING:
+    case FS_LANDING:
+      return true;
+    case FS_LANDED:
+    case FS_EMERGENCY:
+    default:
+      return false;
+  }
 }
 
 void setupSensors() {
@@ -573,13 +615,6 @@ void setup() {
 }
 
 void loop() {
-  /*
-  if (takeoffMillis > 0 && millis() - takeoffMillis > 10000) {
-    takeoffMillis = 0;
-    land();
-  }
-  */
-
   if (millis() - prevSensingMillis > 1000) {
     prevSensingMillis = millis();
     uint16_t mm_up = tof_up.readRangeSingleMillimeters();
@@ -589,7 +624,7 @@ void loop() {
 
     if (!tof_up.timeoutOccurred()) {
       Serial.print("up ToF mm: "); Serial.println(mm_up); // from ceiling
-      if (takeoffMillis > 0) {
+      if (isFlying()) {
         if (mm_up > UP_MAX) { // too far from ceiling
           fly(0, 0, 0, 50); // up
         } else if (mm_up < UP_MIN) { // too near from ceiling
@@ -599,7 +634,7 @@ void loop() {
     }
     if (!tof_front.timeoutOccurred()) {
       Serial.print("front ToF mm: "); Serial.println(mm_front); // from wall
-      if (takeoffMillis > 0) {
+      if (isFlying()) {
         if (mm_front > FRONT_MIN) {
           forward();
           prevNearWall = 0;
@@ -618,10 +653,7 @@ void loop() {
                 break;
               case PS_W2E:
               case PS_E2W:
-                if (millis() - takeoffMillis > 3000) {
-                  takeoffMillis = 0;
-                  land();
-                }
+                land();
                 break;
             }
           }
