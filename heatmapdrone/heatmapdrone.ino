@@ -56,6 +56,27 @@ static uint32_t prevSensingMillis = 0;
 static uint8_t prevNearWall = 0;
 static uint32_t prevTemperatureMillis = 0;
 
+// sensing log data
+struct LOGITEM {
+  uint16_t ds; // millis() in deci(0.1)-seconds
+  uint8_t type; // 0:temperature,(1:light), 10:takeoff,11:turn,12:fly,13:land
+  int16_t value; // temperature*100 value/light/turn/fly value
+} logdata[1080]; // mambo battery works 9m=540s
+// len 5400: error "region RAM overflowed with stack"
+static uint16_t logcount = 0;
+const uint8_t LT_TEMPERATURE = 0;
+const uint8_t LT_LIGHT = 1;
+const uint8_t LT_TAKEOFF = 10;
+const uint8_t LT_TURN = 11;
+const uint8_t LT_FLY = 12;
+const uint8_t LT_LAND = 13;
+
+void addlog(uint8_t type, int16_t value) {
+  logdata[logcount].ds = millis() / 100;
+  logdata[logcount].type = type;
+  logdata[logcount].value = value;
+  ++logcount;
+}
 
 // BLE and minidrone
 // cf.
@@ -265,7 +286,7 @@ void connectionCallBack( const Gap::ConnectionCallbackParams_t *params ) {
 
 void disconnectionCallBack(const Gap::DisconnectionCallbackParams_t *params) {
   Serial.println("Disconnected"); //, start to scanning");
-  lastWriteMillis = takeoffMillis = 0;
+  lastWriteMillis = 0;
   //ble.startScan(scanCallBack);
 }
 
@@ -375,6 +396,7 @@ static void takeoff() {
   };
   ble.gattClient().write(GattClient::GATT_OP_WRITE_CMD, dchars[IDX_COMMAND].getConnectionHandle(), dchars[IDX_COMMAND].getValueHandle(), sizeof(buf), buf);
   lastWriteMillis = takeoffMillis = millis();
+  addlog(LT_TAKEOFF, 0);
 }
 
 static void land() {
@@ -730,6 +752,7 @@ void loop() {
     }
 
     Serial.print("ambient="); Serial.println(ambient);
+    addlog(LT_LIGHT, ambient);
     if (ambient > maxAmbient) { maxAmbient = ambient; }
     if (ambient < minAmbient) { minAmbient = ambient; }
     if (isFlying()) {
@@ -757,16 +780,19 @@ void loop() {
     if (isFlying()) {
       if (req_land) { // land is high priority
         land();
+        addlog(LT_LAND, 0);
       } else if (req_turn) {
         turn_degrees(req_turn);
+        addlog(LT_TURN, req_turn);
         pilotState = req_pilotState;
         prevNearWall = 0;
         if (pilotState == PS_W2E || pilotState == PS_E2W) {
           Serial.println("leaving_light ");
           ambientState = AS_LEAVING_LIGHT;
         }
-      } else {
+      } else if (req_forward != 0 || req_vertical_movement != 0) {
         fly(0, req_forward, 0, req_vertical_movement);
+        addlog(LT_FLY, req_vertical_movement + req_forward/100);
       }
     }
   }
@@ -774,6 +800,7 @@ void loop() {
   if (millis() - prevTemperatureMillis > 2000) {
     prevTemperatureMillis = millis();
     float temp = adt7410.readTemperature();
+    addlog(LT_TEMPERATURE, temp * 100);
     //Serial.print("temperature: "); Serial.println(temp, 1);
   }
 
@@ -784,4 +811,21 @@ void loop() {
   }
 
   ble.waitForEvent();
+
+  if (!isFlying()) {
+    if (Serial.available()) {
+      int ch = Serial.read();
+      if (ch == 'r') {
+        // output logdata
+        Serial.println();
+        for (int i = 0; i < logcount; i++) {
+          struct LOGITEM *p = &logdata[i];
+          Serial.print(p->ds); Serial.print(",");
+          Serial.print(p->type); Serial.print(",");
+          Serial.print(p->value); Serial.println();
+        }
+        logcount = 0;
+      }
+    }
+  }
 }
