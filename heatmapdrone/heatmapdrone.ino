@@ -32,6 +32,13 @@ enum PILOT_STATE {
   PS_NONE, PS_WEST, PS_W2E, PS_EAST, PS_E2W
 } pilotState = PS_WEST;
 
+enum AMBIENT_STATE {
+  AS_LEAVING_LIGHT, AS_APPROACHING_LIGHT, AS_ONLIGHT
+} ambientState = AS_ONLIGHT;
+static uint16_t maxAmbient = 0;
+static uint16_t minAmbient = UINT16_MAX;
+static uint8_t prevDarker = 0;
+
 // sensors
 const uint8_t XSHUT_PIN = D4;
 const uint8_t TOF_UP_NEWADDR = 42; // TOF_FRONT = 41 (default)
@@ -46,7 +53,7 @@ VL53L0X tof_front;
 FaBoTemperature adt7410;
 
 static uint32_t prevSensingMillis = 0;
-static uint32_t prevNearWall = 0;
+static uint8_t prevNearWall = 0;
 static uint32_t prevTemperatureMillis = 0;
 
 
@@ -614,6 +621,55 @@ void setup() {
   ble.startScan(scanCallBack);
 }
 
+bool isDarker(uint16_t ambient) {
+  uint16_t maxdiff = maxAmbient - minAmbient;
+  uint16_t diff = ambient - minAmbient;
+  float d = diff / (float)maxdiff;
+  Serial.print("isDarker="); Serial.print(d, 2);
+  if (d < 0.6) {
+    return true;
+  }
+  return false;
+}
+
+bool isNearMaxAmbient(uint16_t ambient) {
+  uint16_t maxdiff = maxAmbient - minAmbient;
+  uint16_t diff = ambient - minAmbient;
+  float d = diff / (float)maxdiff;
+  Serial.print("isNearMaxAmbient="); Serial.print(d, 2);
+  if (d >= 0.8) {
+    return true;
+  }
+  return false;
+}
+
+enum AMBIENT_STATE getNewAmbientState(enum AMBIENT_STATE currentState, uint16_t ambient) {
+  switch (ambientState) {
+    case AS_LEAVING_LIGHT:
+    case AS_ONLIGHT:
+      if (!isDarker(ambient)) {
+        prevDarker = 0;
+        return currentState;
+      }
+      if (prevDarker == 0) {
+        Serial.print("++prevDarker ");
+        ++prevDarker;
+        return currentState;
+      }
+      // if darker ambient sensor value continues
+      Serial.print("approaching_light ");
+      prevDarker = 0;
+      return AS_APPROACHING_LIGHT;
+    case AS_APPROACHING_LIGHT:
+      if (isNearMaxAmbient(ambient)) {
+        Serial.print("onlight ");
+        return AS_ONLIGHT;
+      }
+      break;
+  }
+  return currentState;
+}
+
 void loop() {
   int8_t req_vertical_movement = 0;
   int8_t req_forward = 0;
@@ -629,35 +685,42 @@ void loop() {
     //Serial.print("sensing ms: "); Serial.println(millis() - prevSensingMillis); // ex.164ms (readAmbient: 117ms, tof: 23ms)
 
     if (!tof_up.timeoutOccurred()) {
-      Serial.print("up ToF mm: "); Serial.println(mm_up); // from ceiling
+      //Serial.print("up ToF mm: "); Serial.println(mm_up); // from ceiling
       if (mm_up > UP_MAX) { // too far from ceiling
+        Serial.print("up ");
         req_vertical_movement = 50; // up
       } else if (mm_up < UP_MIN) { // too near from ceiling
+        Serial.print("down ");
         req_vertical_movement = -50; // down
       }
     }
     if (!tof_front.timeoutOccurred()) {
-      Serial.print("front ToF mm: "); Serial.println(mm_front); // from wall
+      //Serial.print("front ToF mm: "); Serial.println(mm_front); // from wall
       if (isFlying()) {
         if (mm_front > FRONT_MIN) {
+          Serial.print("forward ");
           req_forward = 100;
           prevNearWall = 0;
         } else { // too near from wall
           if (prevNearWall == 0) {
+            Serial.print("++prevNearWall ");
             ++prevNearWall;
           } else { // if near wall sensor value continues
             switch (pilotState) {
               case PS_WEST:
+                Serial.print("w2e ");
                 req_turn = 90;
                 req_pilotState = PS_W2E;
                 break;
               case PS_EAST:
+                Serial.print("e2w ");
                 req_turn = -90;
                 req_pilotState = PS_E2W;
                 break;
               case PS_W2E:
               case PS_E2W:
               default:
+                Serial.print("land ");
                 req_land = true;
                 break;
             }
@@ -665,11 +728,32 @@ void loop() {
         }
       }
     }
-    Serial.print("Ambient: "); Serial.println(ambient);
-    // TODO: PS_W2E/E2W: if find light line, turn_degrees()
-    // TODO: PS_WEST/EAST: trace light line
-    // XXX: rewrite to use state machine and sensor events
 
+    Serial.print("ambient="); Serial.println(ambient);
+    if (ambient > maxAmbient) { maxAmbient = ambient; }
+    if (ambient < minAmbient) { minAmbient = ambient; }
+    if (isFlying()) {
+      // PS_W2E/E2W: if find light line, turn_degrees()
+      if (pilotState == PS_W2E || pilotState == PS_E2W) {
+        enum AMBIENT_STATE prev = ambientState;
+        ambientState = getNewAmbientState(ambientState, ambient);
+        if (prev == AS_APPROACHING_LIGHT && ambientState == AS_ONLIGHT) {
+          if (pilotState == PS_W2E) {
+            Serial.print("east ");
+            req_turn = 90;
+            req_pilotState = PS_EAST;
+          } else { // PS_E2W
+            Serial.print("west ");
+            req_turn = -90;
+            req_pilotState = PS_WEST;
+          }
+        }
+      } else {
+        // TODO: PS_WEST/EAST: trace light line
+      }
+    }
+
+    // XXX: rewrite to use state machine and sensor events
     if (isFlying()) {
       if (req_land) { // land is high priority
         land();
@@ -677,6 +761,10 @@ void loop() {
         turn_degrees(req_turn);
         pilotState = req_pilotState;
         prevNearWall = 0;
+        if (pilotState == PS_W2E || pilotState == PS_E2W) {
+          Serial.println("leaving_light ");
+          ambientState = AS_LEAVING_LIGHT;
+        }
       } else {
         fly(0, req_forward, 0, req_vertical_movement);
       }
@@ -686,11 +774,11 @@ void loop() {
   if (millis() - prevTemperatureMillis > 2000) {
     prevTemperatureMillis = millis();
     float temp = adt7410.readTemperature();
-    Serial.print("temperature: "); Serial.println(temp, 1);
+    //Serial.print("temperature: "); Serial.println(temp, 1);
   }
 
   // avoid disconnect after 5 seconds of inactivity
-  // (lastWriteMillis may be updated in forward()/land())
+  // (lastWriteMillis may be updated in land()/fly()/turn_degrees())
   if (lastWriteMillis > 0 && millis() - lastWriteMillis > 4000) {
     ping();
   }
