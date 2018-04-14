@@ -5,7 +5,7 @@
 #include <VL53L0X.h>
 #include <FaBoTemperature_ADT7410.h>
 
-// pilot plan
+/// pilot plan
 //
 // floor model:
 //
@@ -29,9 +29,10 @@
 //  +-------------+
 //
 enum PILOT_STATE {
-  PS_NONE, PS_WEST, PS_W2E, PS_EAST, PS_E2W
+  PS_WEST, PS_W2E, PS_EAST, PS_E2W
 } pilotState = PS_WEST;
 
+// substate for finding ceiling light on PS_W2E/E2W state
 enum AMBIENT_STATE {
   AS_LEAVING_LIGHT, AS_APPROACHING_LIGHT, AS_ONLIGHT
 } ambientState = AS_ONLIGHT;
@@ -39,7 +40,15 @@ static uint16_t maxAmbient = 0;
 static uint16_t minAmbient = UINT16_MAX;
 static uint8_t prevDarker = 0;
 
-// sensors
+// substate for tracing ceiling light on PS_EAST/WEST state
+enum TRACE_STATE {
+  TS_RIGHT, TS_LEFT, TS_ONLIGHT
+} traceState = TS_ONLIGHT;
+enum TRACE_STATE recentReqTraceState = TS_ONLIGHT;
+static uint16_t prevAmbient = 0;
+const uint16_t AMBIENT_SAME_THRESHOLD = 200;
+
+/// sensors
 const uint8_t XSHUT_PIN = D4;
 const uint8_t TOF_UP_NEWADDR = 42; // TOF_FRONT = 41 (default)
 
@@ -56,9 +65,9 @@ static uint32_t prevSensingMillis = 0;
 static uint8_t prevNearWall = 0;
 static uint32_t prevTemperatureMillis = 0;
 
-// sensing log data
+/// sensing log data
 struct LOGITEM {
-  uint16_t ds; // millis() in deci(0.1)-seconds
+  uint16_t ds; // millis() in deci(0.1)-seconds //TODO:use uint8 by holding diff from prev
   uint8_t type; // 0:temperature,(1:light), 10:takeoff,11:turn,12:fly,13:land
   int16_t value; // temperature*100 value/light/turn/fly value
 } logdata[1080]; // mambo battery works 9m=540s
@@ -78,7 +87,7 @@ void addlog(uint8_t type, int16_t value) {
   ++logcount;
 }
 
-// BLE and minidrone
+/// BLE and minidrone
 // cf.
 // https://github.com/Mechazawa/minidrone-js
 // https://github.com/algolia/pdrone
@@ -692,11 +701,42 @@ enum AMBIENT_STATE getNewAmbientState(enum AMBIENT_STATE currentState, uint16_t 
   return currentState;
 }
 
+int16_t updateTraceState(uint16_t ambient) {
+  int16_t diff = ambient - prevAmbient;
+  if (abs(diff) < AMBIENT_SAME_THRESHOLD) {
+    traceState = TS_ONLIGHT; // XXX: may be on dark
+  } else if (diff > 0) { // lighter
+    traceState = TS_ONLIGHT;
+  } else { // darker
+    switch (traceState) {
+      case TS_RIGHT:
+        traceState = TS_LEFT;
+        break;
+      case TS_LEFT:
+        traceState = TS_RIGHT;
+        break;
+      case TS_ONLIGHT:
+        traceState = (recentReqTraceState == TS_LEFT) ? TS_RIGHT : TS_LEFT;
+        break;
+    }
+  }
+  if (traceState == TS_RIGHT) {
+    Serial.print("right ");
+    recentReqTraceState = traceState;
+    return 20;
+  } else if (traceState == TS_LEFT) {
+    Serial.print("left ");
+    recentReqTraceState = traceState;
+    return -20;
+  }
+  return 0;
+}
+
 void loop() {
   int8_t req_vertical_movement = 0;
   int8_t req_forward = 0;
   int16_t req_turn = 0;
-  enum PILOT_STATE req_pilotState = PS_NONE;
+  enum PILOT_STATE req_pilotState = pilotState;
   bool req_land = false;
 
   if (millis() - prevSensingMillis > 1000) {
@@ -756,7 +796,7 @@ void loop() {
     if (ambient > maxAmbient) { maxAmbient = ambient; }
     if (ambient < minAmbient) { minAmbient = ambient; }
     if (isFlying()) {
-      // PS_W2E/E2W: if find light line, turn_degrees()
+      // PS_W2E/E2W: if find light line, turn_degrees(90/-90)
       if (pilotState == PS_W2E || pilotState == PS_E2W) {
         enum AMBIENT_STATE prev = ambientState;
         ambientState = getNewAmbientState(ambientState, ambient);
@@ -771,8 +811,9 @@ void loop() {
             req_pilotState = PS_WEST;
           }
         }
-      } else {
-        // TODO: PS_WEST/EAST: trace light line
+      } else if (req_turn == 0 && (pilotState == PS_WEST || pilotState == PS_EAST)) {
+        // PS_WEST/EAST: trace light line
+        req_turn = updateTraceState(ambient);
       }
     }
 
@@ -781,7 +822,7 @@ void loop() {
       if (req_land) { // land is high priority
         land();
         addlog(LT_LAND, 0);
-      } else if (req_turn) {
+      } else if (req_turn != 0) {
         turn_degrees(req_turn);
         addlog(LT_TURN, req_turn);
         pilotState = req_pilotState;
@@ -789,6 +830,10 @@ void loop() {
         if (pilotState == PS_W2E || pilotState == PS_E2W) {
           Serial.println("leaving_light ");
           ambientState = AS_LEAVING_LIGHT;
+        } else {
+          traceState = TS_ONLIGHT;
+          recentReqTraceState = (pilotState == PS_EAST) ? TS_RIGHT : TS_LEFT;
+          prevAmbient = ambient;
         }
       } else if (req_forward != 0 || req_vertical_movement != 0) {
         fly(0, req_forward, 0, req_vertical_movement);
@@ -815,9 +860,11 @@ void loop() {
   if (!isFlying()) {
     if (Serial.available()) {
       int ch = Serial.read();
-      if (ch == 'r') {
-        // output logdata
+      if (ch == 'r') { // output logdata
         Serial.println();
+        Serial.print(minAmbient); Serial.print(",");
+        Serial.print(maxAmbient); Serial.print(",");
+        Serial.print(prevAmbient); Serial.println();
         for (int i = 0; i < logcount; i++) {
           struct LOGITEM *p = &logdata[i];
           Serial.print(p->ds); Serial.print(",");
