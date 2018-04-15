@@ -703,6 +703,7 @@ enum AMBIENT_STATE getNewAmbientState(enum AMBIENT_STATE currentState, uint16_t 
 
 int16_t updateTraceState(uint16_t ambient) {
   int16_t diff = ambient - prevAmbient;
+  prevAmbient = ambient;
   if (abs(diff) < AMBIENT_SAME_THRESHOLD) {
     traceState = TS_ONLIGHT; // XXX: may be on dark
   } else if (diff > 0) { // lighter
@@ -739,7 +740,7 @@ void loop() {
   enum PILOT_STATE req_pilotState = pilotState;
   bool req_land = false;
 
-  if (millis() - prevSensingMillis > 1000) {
+  if (millis() - prevSensingMillis > 500) {
     prevSensingMillis = millis();
     uint16_t mm_up = tof_up.readRangeSingleMillimeters();
     uint16_t mm_front = tof_front.readRangeSingleMillimeters();
@@ -792,7 +793,7 @@ void loop() {
     }
 
     Serial.print("ambient="); Serial.println(ambient);
-    addlog(LT_LIGHT, ambient);
+    addlog(LT_LIGHT, ambient); //DEBUG
     if (ambient > maxAmbient) { maxAmbient = ambient; }
     if (ambient < minAmbient) { minAmbient = ambient; }
     if (isFlying()) {
@@ -825,15 +826,18 @@ void loop() {
       } else if (req_turn != 0) {
         turn_degrees(req_turn);
         addlog(LT_TURN, req_turn);
-        pilotState = req_pilotState;
-        prevNearWall = 0;
-        if (pilotState == PS_W2E || pilotState == PS_E2W) {
-          Serial.println("leaving_light ");
-          ambientState = AS_LEAVING_LIGHT;
-        } else {
-          traceState = TS_ONLIGHT;
-          recentReqTraceState = (pilotState == PS_EAST) ? TS_RIGHT : TS_LEFT;
-          prevAmbient = ambient;
+        if (pilotState != req_pilotState) { // turn 90/-90 degrees
+            pilotState = req_pilotState;
+            prevNearWall = 0;
+            if (pilotState == PS_W2E || pilotState == PS_E2W) {
+              Serial.println("leaving_light ");
+              ambientState = AS_LEAVING_LIGHT;
+            } else { // PS_EAST/WEST
+              // reset trace state and related vars
+              traceState = TS_ONLIGHT;
+              recentReqTraceState = (pilotState == PS_EAST) ? TS_RIGHT : TS_LEFT;
+              prevAmbient = ambient;
+            }
         }
       } else if (req_forward != 0 || req_vertical_movement != 0) {
         fly(0, req_forward, 0, req_vertical_movement);
