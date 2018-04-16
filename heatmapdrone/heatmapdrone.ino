@@ -46,6 +46,7 @@ enum TRACE_STATE {
 } traceState = TS_ONLIGHT;
 enum TRACE_STATE recentReqTraceState = TS_ONLIGHT;
 static uint16_t prevAmbient = 0;
+static bool waitingForward = false; // waiting fly forward? (after left/right)
 const uint16_t AMBIENT_SAME_THRESHOLD = 200;
 
 /// sensors
@@ -724,11 +725,11 @@ int16_t updateTraceState(uint16_t ambient) {
   if (traceState == TS_RIGHT) {
     Serial.print("right ");
     recentReqTraceState = traceState;
-    return 20;
+    return 10;
   } else if (traceState == TS_LEFT) {
     Serial.print("left ");
     recentReqTraceState = traceState;
-    return -20;
+    return -10;
   }
   return 0;
 }
@@ -812,9 +813,12 @@ void loop() {
             req_pilotState = PS_WEST;
           }
         }
-      } else if (req_turn == 0 && (pilotState == PS_WEST || pilotState == PS_EAST)) {
+      } else if (req_turn == 0 && (pilotState == PS_WEST || pilotState == PS_EAST) && !waitingForward) {
         // PS_WEST/EAST: trace light line
         req_turn = updateTraceState(ambient);
+        if (req_turn != 0) {
+          waitingForward = true;
+        }
       }
     }
 
@@ -842,6 +846,9 @@ void loop() {
       } else if (req_forward != 0 || req_vertical_movement != 0) {
         fly(0, req_forward, 0, req_vertical_movement);
         addlog(LT_FLY, req_vertical_movement + req_forward/100);
+        if (req_forward != 0) {
+          waitingForward = false;
+        }
       }
     }
   }
