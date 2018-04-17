@@ -5,6 +5,8 @@
 #include <VL53L0X.h>
 #include <FaBoTemperature_ADT7410.h>
 
+#define VERBOSE 0
+
 /// pilot plan
 //
 // floor model:
@@ -30,7 +32,7 @@
 //
 enum PILOT_STATE {
   PS_WEST, PS_W2E, PS_EAST, PS_E2W
-} pilotState = PS_WEST;
+} pilotState = PS_EAST;
 
 // substate for finding ceiling light on PS_W2E/E2W state
 enum FINDLIGHT_STATE {
@@ -239,32 +241,23 @@ void startDiscovery(uint16_t handle) {
  */
 static void scanCallBack(const Gap::AdvertisementCallbackParams_t *params) {
   uint8_t index;
-
   Serial.println("Scan CallBack ");
-  Serial.print("PerrAddress: ");
+  Serial.print("PeerAddress: ");
   for(index=0; index<6; index++) {
     Serial.print(params->peerAddr[index], HEX);
     Serial.print(" ");
   }
   Serial.println(" ");
 
-  Serial.print("The Rssi : ");
-  Serial.println(params->rssi, DEC);
-
-  Serial.print("The adv_data : ");
-  Serial.println((const char*)params->advertisingData);
-
   uint8_t len;
-  uint8_t adv_name[31];
+  uint8_t adv_name[32];
   if( NRF_SUCCESS == ble_advdata_parser(BLE_GAP_AD_TYPE_SHORT_LOCAL_NAME, params->advertisingDataLen, (uint8_t *)params->advertisingData, &len, adv_name) ) {
-    Serial.print("Short name len : ");
-    Serial.println(len, DEC);
+    adv_name[len] = 0; // '\0'
     Serial.print("Short name is : ");
     Serial.println((const char*)adv_name);
   }
   else if( NRF_SUCCESS == ble_advdata_parser(BLE_GAP_AD_TYPE_COMPLETE_LOCAL_NAME, params->advertisingDataLen, (uint8_t *)params->advertisingData, &len, adv_name) ) {
-    Serial.print("Complete name len : ");
-    Serial.println(len, DEC);
+    adv_name[len] = 0; // '\0'
     Serial.print("Complete name is : ");
     Serial.println((const char*)adv_name);
 
@@ -278,6 +271,7 @@ static void scanCallBack(const Gap::AdvertisementCallbackParams_t *params) {
 }
 
 void connectionCallBack( const Gap::ConnectionCallbackParams_t *params ) {
+#if VERBOSE
   uint8_t index;
 
   Serial.print("The conn handle : ");
@@ -289,6 +283,7 @@ void connectionCallBack( const Gap::ConnectionCallbackParams_t *params ) {
     Serial.print(" ");
   }
   Serial.println(" ");
+#endif
   // start to discovery
   startDiscovery(params->handle);
 }
@@ -300,8 +295,8 @@ void disconnectionCallBack(const Gap::DisconnectionCallbackParams_t *params) {
 }
 
 static void discoveredServiceCallBack(const DiscoveredService *service) {
+#if VERBOSE
   Serial.println("\r\n----Service Discovered");
-
   Serial.print("Service UUID type        : ");
   Serial.println(service->getUUID().shortOrLong(), HEX);// 0 16bit_uuid, 1 128bit_uuid
   Serial.print("Service UUID             : ");
@@ -321,6 +316,7 @@ static void discoveredServiceCallBack(const DiscoveredService *service) {
   Serial.println(service->getStartHandle(), HEX);
   Serial.print("The service end handle   : ");
   Serial.println(service->getEndHandle(), HEX);
+#endif
 }
 
 static void discoveredCharacteristicCallBack(const DiscoveredCharacteristic *chars) {
@@ -330,6 +326,7 @@ static void discoveredCharacteristicCallBack(const DiscoveredCharacteristic *cha
     }
   }
 
+#if VERBOSE
   Serial.println("\r\n----Characteristic Discovered");
   Serial.print("Chars UUID type        : ");
   Serial.println(chars->getUUID().shortOrLong(), HEX);// 0 16bit_uuid, 1 128bit_uuid
@@ -362,13 +359,18 @@ static void discoveredCharacteristicCallBack(const DiscoveredCharacteristic *cha
   Serial.println(chars->getValueHandle(), HEX);
   Serial.print("lastHandle             : ");
   Serial.println(chars->getLastHandle(), HEX);
+#endif
 }
 
 static void discoveryTerminationCallBack(Gap::Handle_t connectionHandle) {
+#if VERBOSE
   Serial.println("\r\n----discoveryTermination");
+#endif
   for (discovering_char_desc = 0; discovering_char_desc < SIZE_CHARS; discovering_char_desc++) {
     if (dchars[discovering_char_desc].getUUID() != UUID::ShortUUIDBytes_t(0)) {
+#if VERBOSE
       Serial.println(dchars[discovering_char_desc].getUUID().getShortUUID(), HEX);
+#endif
       ble.gattClient().discoverCharacteristicDescriptors(dchars[discovering_char_desc], discoveredCharsDescriptorCallBack, discoveredDescTerminationCallBack);
       break; // continue after discoveredDescTerminationCallBack
     }
@@ -376,6 +378,8 @@ static void discoveryTerminationCallBack(Gap::Handle_t connectionHandle) {
 }
 
 static void discoveredCharsDescriptorCallBack(const CharacteristicDescriptorDiscovery::DiscoveryCallbackParams_t *params) {
+  dchar_descs[discovering_char_desc] = params->descriptor;
+#if VERBOSE
   Serial.println("\r\n----discovered descriptor");
   Serial.print("Descriptor UUID type        : ");
   Serial.println(params->descriptor.getUUID().shortOrLong(), HEX);
@@ -391,11 +395,11 @@ static void discoveredCharsDescriptorCallBack(const CharacteristicDescriptorDisc
     }
     Serial.println(" ");
   }
-  dchar_descs[discovering_char_desc] = params->descriptor;
   Serial.print("connectionHandle       : ");
   Serial.println(params->descriptor.getConnectionHandle(), HEX);
   Serial.print("descriptor Handle      : ");
   Serial.println(params->descriptor.getAttributeHandle(), HEX);
+#endif
 }
 
 static void takeoff() {
@@ -461,7 +465,9 @@ static void ping() {
 }
 
 static int handshake() {
+#if VERBOSE
   Serial.print("subscribe minidrone notify: ");
+#endif
   for (; subscribing_char_desc < SIZE_CHARS; subscribing_char_desc++) {
     if (dchar_descs[subscribing_char_desc].getUUID() != UUID::ShortUUIDBytes_t(0)) {
       Serial.println(dchars[subscribing_char_desc].getUUID().getShortUUID(), HEX);
@@ -478,7 +484,9 @@ static int handshake() {
 }
 
 static void discoveredDescTerminationCallBack(const CharacteristicDescriptorDiscovery::TerminationCallbackParams_t *params) {
+#if VERBOSE
   Serial.println("\r\n----discovery descriptor Termination");
+#endif
   if (++discovering_char_desc >= SIZE_CHARS) {
     // start handshake
     subscribing_char_desc = 0;
@@ -510,8 +518,10 @@ static void discoveredDescTerminationCallBack(const CharacteristicDescriptorDisc
  *                       params->data : Pointer to the data to write
  */
 void onDataWriteCallBack(const GattWriteCallbackParams *params) {
+#if VERBOSE
   Serial.print("GattClient write call back: ");
   Serial.println(params->handle, HEX);
+#endif
   if (subscribing_char_desc < SIZE_CHARS) {
     ++subscribing_char_desc;
     handshake();
