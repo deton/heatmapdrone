@@ -33,21 +33,20 @@ enum PILOT_STATE {
 } pilotState = PS_WEST;
 
 // substate for finding ceiling light on PS_W2E/E2W state
-enum AMBIENT_STATE {
-  AS_LEAVING_LIGHT, AS_APPROACHING_LIGHT, AS_ONLIGHT
-} ambientState = AS_ONLIGHT;
-static uint16_t maxAmbient = 0;
-static uint16_t minAmbient = UINT16_MAX;
+enum FINDLIGHT_STATE {
+  FS_LEAVING_LIGHT, FS_APPROACHING_LIGHT, FS_ONLIGHT
+} findlightState = FS_ONLIGHT;
 static uint8_t prevDarker = 0;
+static uint8_t prevLighter = 0;
+const uint16_t AMBIENT_DARK_THRESHOLD = 2400; // XXX
+const uint16_t AMBIENT_LIGHT_THRESHOLD = 3900; // XXX
 
 // substate for tracing ceiling light on PS_EAST/WEST state
 enum TRACE_STATE {
   TS_RIGHT, TS_LEFT, TS_ONLIGHT
 } traceState = TS_ONLIGHT;
 enum TRACE_STATE recentReqTraceState = TS_ONLIGHT;
-static uint16_t prevAmbient = 0;
 static bool waitingForward = false; // waiting fly forward? (after left/right)
-const uint16_t AMBIENT_SAME_THRESHOLD = 200;
 
 /// sensors
 const uint8_t XSHUT_PIN = D4;
@@ -654,31 +653,17 @@ void setup() {
 }
 
 bool isDarker(uint16_t ambient) {
-  uint16_t maxdiff = maxAmbient - minAmbient;
-  uint16_t diff = ambient - minAmbient;
-  float d = diff / (float)maxdiff;
-  Serial.print("isDarker="); Serial.print(d, 2);
-  if (d < 0.6) {
-    return true;
-  }
-  return false;
+  return (ambient < AMBIENT_DARK_THRESHOLD);
 }
 
-bool isNearMaxAmbient(uint16_t ambient) {
-  uint16_t maxdiff = maxAmbient - minAmbient;
-  uint16_t diff = ambient - minAmbient;
-  float d = diff / (float)maxdiff;
-  Serial.print("isNearMaxAmbient="); Serial.print(d, 2);
-  if (d >= 0.8) {
-    return true;
-  }
-  return false;
+bool isLighter(uint16_t ambient) {
+  return (ambient >= AMBIENT_LIGHT_THRESHOLD);
 }
 
-enum AMBIENT_STATE getNewAmbientState(enum AMBIENT_STATE currentState, uint16_t ambient) {
-  switch (ambientState) {
-    case AS_LEAVING_LIGHT:
-    case AS_ONLIGHT:
+enum FINDLIGHT_STATE getNewFindlightState(enum FINDLIGHT_STATE currentState, uint16_t ambient) {
+  switch (findlightState) {
+    case FS_LEAVING_LIGHT:
+    case FS_ONLIGHT:
       if (!isDarker(ambient)) {
         prevDarker = 0;
         return currentState;
@@ -691,36 +676,65 @@ enum AMBIENT_STATE getNewAmbientState(enum AMBIENT_STATE currentState, uint16_t 
       // if darker ambient sensor value continues
       Serial.print("approaching_light ");
       prevDarker = 0;
-      return AS_APPROACHING_LIGHT;
-    case AS_APPROACHING_LIGHT:
-      if (isNearMaxAmbient(ambient)) {
-        Serial.print("onlight ");
-        return AS_ONLIGHT;
+      return FS_APPROACHING_LIGHT;
+    case FS_APPROACHING_LIGHT:
+      if (!isLighter(ambient)) {
+        prevLighter = 0;
+        return currentState;
       }
-      break;
+      if (prevLighter == 0) {
+        Serial.print("++prevLighter ");
+        ++prevLighter;
+        return currentState;
+      }
+      Serial.print("onlight ");
+      prevLighter = 0;
+      return FS_ONLIGHT;
   }
   return currentState;
 }
 
+enum TRACE_STATE getNewTraceState(enum TRACE_STATE currentState, uint16_t ambient) {
+  switch (currentState) {
+    case TS_ONLIGHT:
+      if (!isDarker(ambient)) {
+        prevDarker = 0;
+        return currentState;
+      }
+      if (prevDarker == 0) {
+        Serial.print("++prevDarker ");
+        ++prevDarker;
+        return currentState;
+      }
+      // if darker ambient sensor value continues
+      prevDarker = 0;
+      return (recentReqTraceState == TS_LEFT) ? TS_RIGHT : TS_LEFT;
+    case TS_LEFT:
+    case TS_RIGHT:
+      if (!isDarker(ambient)) {
+        prevDarker = 0;
+        if (prevLighter == 0) {
+          ++prevLighter;
+          return currentState;
+        }
+        prevLighter = 0;
+        return TS_ONLIGHT;
+      }
+      prevLighter = 0;
+      if (prevDarker == 0) {
+        ++prevDarker;
+        return currentState;
+      }
+      prevDarker = 0;
+      return (currentState == TS_LEFT) ? TS_RIGHT : TS_LEFT;
+  }
+}
+
 int16_t updateTraceState(uint16_t ambient) {
-  int16_t diff = ambient - prevAmbient;
-  prevAmbient = ambient;
-  if (abs(diff) < AMBIENT_SAME_THRESHOLD) {
-    traceState = TS_ONLIGHT; // XXX: may be on dark
-  } else if (diff > 0) { // lighter
-    traceState = TS_ONLIGHT;
-  } else { // darker
-    switch (traceState) {
-      case TS_RIGHT:
-        traceState = TS_LEFT;
-        break;
-      case TS_LEFT:
-        traceState = TS_RIGHT;
-        break;
-      case TS_ONLIGHT:
-        traceState = (recentReqTraceState == TS_LEFT) ? TS_RIGHT : TS_LEFT;
-        break;
-    }
+  enum TRACE_STATE prev = traceState;
+  traceState = getNewTraceState(traceState, ambient);
+  if (prev == traceState) {
+    return 0;
   }
   if (traceState == TS_RIGHT) {
     Serial.print("right ");
@@ -795,14 +809,12 @@ void loop() {
 
     Serial.print("ambient="); Serial.println(ambient);
     addlog(LT_LIGHT, ambient); //DEBUG
-    if (ambient > maxAmbient) { maxAmbient = ambient; }
-    if (ambient < minAmbient) { minAmbient = ambient; }
     if (isFlying()) {
       // PS_W2E/E2W: if find light line, turn_degrees(90/-90)
       if (pilotState == PS_W2E || pilotState == PS_E2W) {
-        enum AMBIENT_STATE prev = ambientState;
-        ambientState = getNewAmbientState(ambientState, ambient);
-        if (prev == AS_APPROACHING_LIGHT && ambientState == AS_ONLIGHT) {
+        enum FINDLIGHT_STATE prev = findlightState;
+        findlightState = getNewFindlightState(findlightState, ambient);
+        if (prev == FS_APPROACHING_LIGHT && findlightState == FS_ONLIGHT) {
           if (pilotState == PS_W2E) {
             Serial.print("east ");
             req_turn = 90;
@@ -833,14 +845,15 @@ void loop() {
         if (pilotState != req_pilotState) { // turn 90/-90 degrees
             pilotState = req_pilotState;
             prevNearWall = 0;
+            prevDarker = 0;
+            prevLighter = 0;
             if (pilotState == PS_W2E || pilotState == PS_E2W) {
               Serial.println("leaving_light ");
-              ambientState = AS_LEAVING_LIGHT;
+              findlightState = FS_LEAVING_LIGHT;
             } else { // PS_EAST/WEST
               // reset trace state and related vars
               traceState = TS_ONLIGHT;
               recentReqTraceState = (pilotState == PS_EAST) ? TS_RIGHT : TS_LEFT;
-              prevAmbient = ambient;
             }
         }
       } else if (req_forward != 0 || req_vertical_movement != 0) {
@@ -873,9 +886,6 @@ void loop() {
       int ch = Serial.read();
       if (ch == 'r') { // output logdata
         Serial.println();
-        Serial.print(minAmbient); Serial.print(",");
-        Serial.print(maxAmbient); Serial.print(",");
-        Serial.print(prevAmbient); Serial.println();
         for (int i = 0; i < logcount; i++) {
           struct LOGITEM *p = &logdata[i];
           Serial.print(p->ds); Serial.print(",");
