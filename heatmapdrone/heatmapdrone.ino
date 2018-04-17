@@ -728,6 +728,7 @@ enum TRACE_STATE getNewTraceState(enum TRACE_STATE currentState, uint16_t ambien
       prevDarker = 0;
       return (currentState == TS_LEFT) ? TS_RIGHT : TS_LEFT;
   }
+  return currentState;
 }
 
 int16_t updateTraceState(uint16_t ambient) {
@@ -749,11 +750,11 @@ int16_t updateTraceState(uint16_t ambient) {
 }
 
 void loop() {
+  static bool req_land = false;
   int8_t req_vertical_movement = 0;
   int8_t req_forward = 0;
   int16_t req_turn = 0;
   enum PILOT_STATE req_pilotState = pilotState;
-  bool req_land = false;
 
   if (millis() - prevSensingMillis > 300) {
     prevSensingMillis = millis();
