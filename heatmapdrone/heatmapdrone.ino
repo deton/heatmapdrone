@@ -434,7 +434,7 @@ static void fly(int8_t roll, int8_t pitch, int8_t yaw, int8_t vertical) {
 }
 
 static void forward() {
-  fly(0, 100, 0, 0);
+  fly(0, 50, 0, 0);
 }
 
 // Turn the mambo the specified number of degrees [-180, 180]
@@ -739,11 +739,11 @@ int16_t updateTraceState(uint16_t ambient) {
   if (traceState == TS_RIGHT) {
     Serial.print("right ");
     recentReqTraceState = traceState;
-    return 10;
+    return 20;
   } else if (traceState == TS_LEFT) {
     Serial.print("left ");
     recentReqTraceState = traceState;
-    return -10;
+    return -20;
   }
   return 0;
 }
@@ -755,7 +755,7 @@ void loop() {
   enum PILOT_STATE req_pilotState = pilotState;
   bool req_land = false;
 
-  if (millis() - prevSensingMillis > 500) {
+  if (millis() - prevSensingMillis > 300) {
     prevSensingMillis = millis();
     uint16_t mm_up = tof_up.readRangeSingleMillimeters();
     uint16_t mm_front = tof_front.readRangeSingleMillimeters();
@@ -777,7 +777,7 @@ void loop() {
       if (isFlying()) {
         if (mm_front > FRONT_MIN) {
           Serial.print("forward ");
-          req_forward = 100;
+          req_forward = 50;
           prevNearWall = 0;
         } else { // too near from wall
           if (prevNearWall == 0) {
@@ -858,7 +858,7 @@ void loop() {
         }
       } else if (req_forward != 0 || req_vertical_movement != 0) {
         fly(0, req_forward, 0, req_vertical_movement);
-        addlog(LT_FLY, req_vertical_movement + req_forward/100);
+        addlog(LT_FLY, req_vertical_movement + req_forward/50);
         if (req_forward != 0) {
           waitingForward = false;
         }
