@@ -5,7 +5,7 @@
 #include <VL53L0X.h>
 #include <FaBoTemperature_ADT7410.h>
 
-#define VERBOSE 0
+#define VERBOSE 1 // XXX: if 0, BLE connection does not complete occasionally
 
 /// pilot plan
 //
@@ -32,7 +32,7 @@
 //
 enum PILOT_STATE {
   PS_WEST, PS_W2E, PS_EAST, PS_E2W
-} pilotState = PS_EAST;
+} pilotState = PS_WEST;
 
 // substate for finding ceiling light on PS_W2E/E2W state
 enum FINDLIGHT_STATE {
@@ -50,13 +50,19 @@ enum TRACE_STATE {
 enum TRACE_STATE recentReqTraceState = TS_ONLIGHT;
 static bool waitingForward = false; // waiting fly forward? (after left/right)
 
-/// sensors
-const uint8_t XSHUT_PIN = D4;
-const uint8_t TOF_UP_NEWADDR = 42; // TOF_FRONT = 41 (default)
+const uint16_t TURN_RIGHT_VALUE = 15; // [degree]
 
+/// sensors
+const uint16_t SENSING_INTERVAL = 1000; // [ms]
+const uint16_t FORWARD_VALUE = 100; // [-100,100]
+const uint16_t UP_VALUE = 50; // [-100,100]
+
+const uint16_t FRONT_MIN = 2500; // 2.5m from wall
 const uint16_t UP_MIN = 300; // 30cm from ceiling
 const uint16_t UP_MAX = 1000; // 1m from ceiling
-const uint16_t FRONT_MIN = 1000; // 1m from wall
+
+const uint8_t XSHUT_PIN = D4;
+const uint8_t TOF_UP_NEWADDR = 42; // TOF_FRONT = 41 (default)
 
 Adafruit_VCNL4010 vcnl;
 VL53L0X tof_up;
@@ -438,7 +444,7 @@ static void fly(int8_t roll, int8_t pitch, int8_t yaw, int8_t vertical) {
 }
 
 static void forward() {
-  fly(0, 50, 0, 0);
+  fly(0, FORWARD_VALUE, 0, 0);
 }
 
 // Turn the mambo the specified number of degrees [-180, 180]
@@ -750,11 +756,11 @@ int16_t updateTraceState(uint16_t ambient) {
   if (traceState == TS_RIGHT) {
     Serial.print("right ");
     recentReqTraceState = traceState;
-    return 20;
+    return TURN_RIGHT_VALUE;
   } else if (traceState == TS_LEFT) {
     Serial.print("left ");
     recentReqTraceState = traceState;
-    return -20;
+    return -TURN_RIGHT_VALUE;
   }
   return 0;
 }
@@ -766,7 +772,7 @@ void loop() {
   int16_t req_turn = 0;
   enum PILOT_STATE req_pilotState = pilotState;
 
-  if (millis() - prevSensingMillis > 300) {
+  if (millis() - prevSensingMillis > SENSING_INTERVAL) {
     prevSensingMillis = millis();
     uint16_t mm_up = tof_up.readRangeSingleMillimeters();
     uint16_t mm_front = tof_front.readRangeSingleMillimeters();
@@ -777,10 +783,10 @@ void loop() {
       //Serial.print("up ToF mm: "); Serial.println(mm_up); // from ceiling
       if (mm_up > UP_MAX) { // too far from ceiling
         Serial.print("up ");
-        req_vertical_movement = 50; // up
+        req_vertical_movement = UP_VALUE; // up
       } else if (mm_up < UP_MIN) { // too near from ceiling
         Serial.print("down ");
-        req_vertical_movement = -50; // down
+        req_vertical_movement = -UP_VALUE; // down
       }
     }
     if (!tof_front.timeoutOccurred()) {
@@ -788,7 +794,7 @@ void loop() {
       if (isFlying()) {
         if (mm_front > FRONT_MIN) {
           Serial.print("forward ");
-          req_forward = 50;
+          req_forward = FORWARD_VALUE;
           prevNearWall = 0;
         } else { // too near from wall
           if (prevNearWall == 0) {
@@ -869,7 +875,7 @@ void loop() {
         }
       } else if (req_forward != 0 || req_vertical_movement != 0) {
         fly(0, req_forward, 0, req_vertical_movement);
-        addlog(LT_FLY, req_vertical_movement + req_forward/50);
+        addlog(LT_FLY, req_vertical_movement + req_forward/FORWARD_VALUE);
         if (req_forward != 0) {
           waitingForward = false;
         }
@@ -897,6 +903,9 @@ void loop() {
       int ch = Serial.read();
       if (ch == 'r') { // output logdata
         Serial.println();
+        Serial.print(SENSING_INTERVAL); Serial.print(",");
+        Serial.print(FORWARD_VALUE); Serial.print(",");
+        Serial.print(TURN_RIGHT_VALUE); Serial.println();
         for (int i = 0; i < logcount; i++) {
           struct LOGITEM *p = &logdata[i];
           Serial.print(p->ds); Serial.print(",");
