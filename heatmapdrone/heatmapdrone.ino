@@ -31,8 +31,8 @@
 //  +-------------+
 //
 enum PILOT_STATE {
-  PS_WEST, PS_W2E, PS_EAST, PS_E2W
-} pilotState = PS_WEST;
+  PS_INIT, PS_READY, PS_WEST, PS_W2E, PS_EAST, PS_E2W, PS_LAND
+} pilotState = PS_INIT;
 
 // substate for finding ceiling light on PS_W2E/E2W state
 enum FINDLIGHT_STATE {
@@ -50,11 +50,11 @@ enum TRACE_STATE {
 enum TRACE_STATE recentReqTraceState = TS_ONLIGHT;
 static bool waitingForward = false; // waiting fly forward? (after left/right)
 
-const uint16_t TURN_RIGHT_VALUE = 15; // [degree]
+const uint16_t TURN_RIGHT_VALUE = 20; // [degree]
 
 /// sensors
-const uint16_t SENSING_INTERVAL = 1000; // [ms]
-const uint16_t FORWARD_VALUE = 100; // [-100,100]
+const uint16_t SENSING_INTERVAL = 350; // [ms]
+const uint16_t FORWARD_VALUE = 35; // [-100,100]
 const uint16_t UP_VALUE = 50; // [-100,100]
 
 const uint16_t FRONT_MIN = 2500; // 2.5m from wall
@@ -147,8 +147,9 @@ enum FLYING_STATE {
 // to write:
 //  flight_params('fa0a'), command('fa0b'), emergency('fa0c')
 // notify (needs to subscribe as handshake):
-//  battery('fb0f'), flight_status('fb0e'), 'fb1b', 'fb1c',
-//  'fd22', 'fd23', 'fd24', 'fd52', 'fd53', 'fd54',
+//  battery('fb0f'), flight_status('fb0e'), ack_for_command('fb1b'),
+//  ack_for_emergency('fb1c'),
+//  ftp channels('fd22', 'fd23', 'fd24', 'fd52', 'fd53', 'fd54')
 const int SIZE_CHARS = 13;
 static UUID uuid_chars[SIZE_CHARS] = {
   UUID("9a66fa0a-0800-9191-11e4-012d1540cb8e"),
@@ -167,7 +168,7 @@ static UUID uuid_chars[SIZE_CHARS] = {
 };
 enum IDX_CHARS {
   IDX_FLIGHT_PARAMS, IDX_COMMAND, IDX_EMERGENCY,
-  IDX_BATTERY, IDX_FLIGHT_STATUS, IDX_FB1B, IDX_FB1C,
+  IDX_BATTERY, IDX_FLIGHT_STATUS, IDX_COMMANDACK, IDX_EMERGENCYACK,
   IDX_FD22, IDX_FD23, IDX_FD24, IDX_FD52, IDX_FD53, IDX_FD54
 };
 static DiscoveredCharacteristic            dchars[SIZE_CHARS];
@@ -192,7 +193,6 @@ static uint8_t steps_flight_params; // step count for fa0a
 static uint8_t steps_command;       // step count for fa0b
 //static uint8_t steps_emergency;     // step count for fa0c
 
-static uint32_t takeoffMillis;
 static uint32_t lastWriteMillis;
 
 static void scanCallBack(const Gap::AdvertisementCallbackParams_t *params);
@@ -408,14 +408,25 @@ static void discoveredCharsDescriptorCallBack(const CharacteristicDescriptorDisc
 #endif
 }
 
+// send flat trim (calibration) command for flight stability.
+// (to reduce sliding in hover mode after crash)
+static void flattrim() {
+  Serial.println("flattrim");
+  uint8_t buf[] = {
+    MDDT_DATA, ++steps_command, MD_DEVICE_TYPE, MDC_PILOTING, MDM_TRIM, MD_END
+  };
+  // XXX: should use WRITE_REQ and check ACK on onDataWriteCallBack()?
+  ble.gattClient().write(GattClient::GATT_OP_WRITE_CMD, dchars[IDX_COMMAND].getConnectionHandle(), dchars[IDX_COMMAND].getValueHandle(), sizeof(buf), buf);
+  lastWriteMillis = millis();
+}
+
 static void takeoff() {
   Serial.println("takeoff");
   uint8_t buf[] = {
     MDDT_DATA, ++steps_command, MD_DEVICE_TYPE, MDC_PILOTING, MDM_TAKEOFF, MD_END
   };
   ble.gattClient().write(GattClient::GATT_OP_WRITE_CMD, dchars[IDX_COMMAND].getConnectionHandle(), dchars[IDX_COMMAND].getValueHandle(), sizeof(buf), buf);
-  lastWriteMillis = takeoffMillis = millis();
-  addlog(LT_TAKEOFF, 0);
+  lastWriteMillis = millis();
 }
 
 static void land() {
@@ -484,8 +495,8 @@ static int handshake() {
   }
   Serial.println("handshake done");
   // ready
-  // XXX: takeoff test
-  takeoff();
+  flattrim();
+  pilotState = PS_READY;
   return 1;
 }
 
@@ -506,6 +517,15 @@ static void discoveredDescTerminationCallBack(const CharacteristicDescriptorDisc
       break; // continue after discoveredDescTerminationCallBack
     }
   }
+}
+
+int getCharsIdxByHandle(GattAttribute::Handle_t handle) {
+  for (int i = 0; i < SIZE_CHARS; i++) {
+    if (dchars[i].getValueHandle() == handle) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 /** @brief  write callback handle
@@ -533,6 +553,10 @@ void onDataWriteCallBack(const GattWriteCallbackParams *params) {
     handshake();
     return;
   }
+  // ACK for WRITE_REQ on IDX_COMMAND
+  //if (getCharsIdxByHandle(params->handle) == IDX_COMMAND) {
+  //  return;
+  //}
 }
 
 /** @brief  read callback handle
@@ -573,7 +597,7 @@ void hvxCallBack(const GattHVXCallbackParams *params) {
   }
   // BC: flight_status(fb0e)
   // BF: battery(fb0f)
-  if (params->handle != 0xBC) {
+  if (getCharsIdxByHandle(params->handle) != IDX_FLIGHT_STATUS) {
     return;
   }
   //   ack_id, packet_id, project_id, myclass_id, cmd_id, extra_id, param
@@ -596,12 +620,15 @@ void hvxCallBack(const GattHVXCallbackParams *params) {
   if (params->data[3] != MYCLASS_ID_PILOTINGSTATE) {
     return;
   }
+  //static const uint8_t CMD_ID_FLATTRIMCHANGED = 0;
   static const uint8_t CMD_ID_FLYINGSTATECHANGED = 1;
   //static const uint8_t CMD_ID_ALERTSTATECHANGED = 2;
   //static const uint8_t CMD_ID_AUTOTAKEOFFMODECHANGED = 3;
   //static const uint8_t CMD_ID_BATTERYSTATECHANGED = 0;
   //static const uint8_t CMD_ID_RUNIDCHANGED = 0;
   if (params->data[4] != CMD_ID_FLYINGSTATECHANGED) {
+    //Serial.print("piloting state changed (other than flying state):");
+    //Serial.println(params->data[4]);
     return;
   }
   flyingState = (enum FLYING_STATE)params->data[6];
@@ -856,6 +883,7 @@ void loop() {
       if (req_land) { // land is high priority
         land();
         addlog(LT_LAND, 0);
+        pilotState = PS_LAND;
       } else if (req_turn != 0) {
         turn_degrees(req_turn);
         addlog(LT_TURN, req_turn);
@@ -879,6 +907,12 @@ void loop() {
         if (req_forward != 0) {
           waitingForward = false;
         }
+      }
+    } else { // !isFlying()
+      if (pilotState == PS_READY) {
+        takeoff();
+        addlog(LT_TAKEOFF, 0);
+        pilotState = PS_EAST;
       }
     }
   }
