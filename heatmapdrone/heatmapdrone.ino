@@ -56,9 +56,10 @@ static bool waitingForward = false; // waiting fly forward? (after left/right)
 const uint16_t TURN_RIGHT_VALUE = 20; // [degree]
 
 /// sensors
-const uint16_t SENSING_INTERVAL = 900; // [ms]
-const uint16_t FORWARD_VALUE = 90; // [-100,100]
+const uint16_t SENSING_INTERVAL = 800; // [ms]
+const uint16_t FORWARD_VALUE = 80; // [-100,100]
 const uint16_t UP_VALUE = 50; // [-100,100]
+const uint16_t DRIFT_OFFSET = -5; // offset to fix drift on forward [-100,100]
 
 const uint16_t FRONT_MIN = 2500; // 2.5m from wall
 const uint16_t UP_MIN = 300; // 30cm from ceiling
@@ -440,7 +441,10 @@ static void land() {
   lastWriteMillis = millis();
 }
 
-// @param roll, pitch, yaw, vertical: [-100, 100]
+// @param roll: right/left [-100, 100]
+// @param pitch: forward/backward [-100, 100]
+// @param yaw: turn [-100, 100]
+// @param vertical: up/down [-100, 100]
 static void fly(int8_t roll, int8_t pitch, int8_t yaw, int8_t vertical) {
   Serial.print("fly:");
   Serial.print(roll); Serial.print(",");
@@ -915,7 +919,7 @@ void senseAndPilot() {
           }
       }
     } else if (req_forward != 0 || req_vertical_movement != 0) {
-      fly(0, req_forward, 0, req_vertical_movement);
+      fly(DRIFT_OFFSET, req_forward, 0, req_vertical_movement);
       addlog(LT_FLY, req_vertical_movement + req_forward/FORWARD_VALUE);
       if (req_forward != 0) {
         waitingForward = false;
