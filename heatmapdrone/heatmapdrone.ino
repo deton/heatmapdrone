@@ -31,30 +31,33 @@
 //  +-------------+
 //
 enum PILOT_STATE {
-  PS_INIT, PS_READY, PS_WEST, PS_W2E, PS_EAST, PS_E2W, PS_LAND
-} pilotState = PS_INIT;
+  PS_INIT, PS_WEST, PS_W2E, PS_EAST, PS_E2W, PS_LAND
+};
+volatile enum PILOT_STATE pilotState = PS_INIT;
 
 // substate for finding ceiling light on PS_W2E/E2W state
 enum FINDLIGHT_STATE {
   FS_LEAVING_LIGHT, FS_APPROACHING_LIGHT, FS_ONLIGHT
-} findlightState = FS_ONLIGHT;
-static uint8_t prevDarker = 0;
-static uint8_t prevLighter = 0;
+};
+volatile enum FINDLIGHT_STATE findlightState = FS_ONLIGHT;
+volatile uint8_t prevDarker = 0;
+volatile uint8_t prevLighter = 0;
 const uint16_t AMBIENT_DARK_THRESHOLD = 2400; // XXX
 const uint16_t AMBIENT_LIGHT_THRESHOLD = 3900; // XXX
 
 // substate for tracing ceiling light on PS_EAST/WEST state
 enum TRACE_STATE {
   TS_RIGHT, TS_LEFT, TS_ONLIGHT
-} traceState = TS_ONLIGHT;
-enum TRACE_STATE recentReqTraceState = TS_ONLIGHT;
+};
+volatile enum TRACE_STATE traceState = TS_ONLIGHT;
+volatile enum TRACE_STATE recentReqTraceState = TS_ONLIGHT;
 static bool waitingForward = false; // waiting fly forward? (after left/right)
 
 const uint16_t TURN_RIGHT_VALUE = 20; // [degree]
 
 /// sensors
-const uint16_t SENSING_INTERVAL = 350; // [ms]
-const uint16_t FORWARD_VALUE = 35; // [-100,100]
+const uint16_t SENSING_INTERVAL = 900; // [ms]
+const uint16_t FORWARD_VALUE = 90; // [-100,100]
 const uint16_t UP_VALUE = 50; // [-100,100]
 
 const uint16_t FRONT_MIN = 2500; // 2.5m from wall
@@ -64,14 +67,12 @@ const uint16_t UP_MAX = 1000; // 1m from ceiling
 const uint8_t XSHUT_PIN = D4;
 const uint8_t TOF_UP_NEWADDR = 42; // TOF_FRONT = 41 (default)
 
+static volatile bool triggerSensorPolling = false;
+
 Adafruit_VCNL4010 vcnl;
 VL53L0X tof_up;
 VL53L0X tof_front;
 FaBoTemperature adt7410;
-
-static uint32_t prevSensingMillis = 0;
-static uint8_t prevNearWall = 0;
-static uint32_t prevTemperatureMillis = 0;
 
 /// sensing log data
 struct LOGITEM {
@@ -103,7 +104,8 @@ void addlog(uint8_t type, int16_t value) {
 // https://github.com/amymcgovern/pymambo
 // https://github.com/voodootikigod/node-rolling-spider
 
-BLE           ble;
+BLE ble;
+Ticker ticker;
 
 // MD_CLASSES
 // https://github.com/Parrot-Developers/arsdk-xml/blob/master/xml/minidrone.xml
@@ -142,7 +144,8 @@ const uint8_t MD_END = 0x00;
 enum FLYING_STATE {
   FS_LANDED = 0, FS_TAKINGOFF, FS_HOVERING, FS_FLYING, FS_LANDING,
   FS_EMERGENCY, FS_ROLLING, FS_INIT
-} flyingState = FS_LANDED;
+};
+volatile enum FLYING_STATE flyingState = FS_LANDED;
 
 // to write:
 //  flight_params('fa0a'), command('fa0b'), emergency('fa0c')
@@ -187,13 +190,13 @@ static DiscoveredCharacteristicDescriptor  dchar_descs[SIZE_CHARS] = {
   DiscoveredCharacteristicDescriptor(NULL,GattAttribute::INVALID_HANDLE,GattAttribute::INVALID_HANDLE,UUID::ShortUUIDBytes_t(0)),
   DiscoveredCharacteristicDescriptor(NULL,GattAttribute::INVALID_HANDLE,GattAttribute::INVALID_HANDLE,UUID::ShortUUIDBytes_t(0)),
 };
-static int discovering_char_desc;
-static int subscribing_char_desc;
-static uint8_t steps_flight_params; // step count for fa0a
-static uint8_t steps_command;       // step count for fa0b
-//static uint8_t steps_emergency;     // step count for fa0c
+volatile int discovering_char_desc;
+volatile int subscribing_char_desc;
+volatile uint8_t steps_flight_params; // step count for fa0a
+volatile uint8_t steps_command;       // step count for fa0b
+//volatile uint8_t steps_emergency;     // step count for fa0c
 
-static uint32_t lastWriteMillis;
+volatile uint32_t lastWriteMillis;
 
 static void scanCallBack(const Gap::AdvertisementCallbackParams_t *params);
 static void discoveredServiceCallBack(const DiscoveredService *service);
@@ -415,8 +418,7 @@ static void flattrim() {
   uint8_t buf[] = {
     MDDT_DATA, ++steps_command, MD_DEVICE_TYPE, MDC_PILOTING, MDM_TRIM, MD_END
   };
-  // XXX: should use WRITE_REQ and check ACK on onDataWriteCallBack()?
-  ble.gattClient().write(GattClient::GATT_OP_WRITE_CMD, dchars[IDX_COMMAND].getConnectionHandle(), dchars[IDX_COMMAND].getValueHandle(), sizeof(buf), buf);
+  ble.gattClient().write(GattClient::GATT_OP_WRITE_REQ, dchars[IDX_COMMAND].getConnectionHandle(), dchars[IDX_COMMAND].getValueHandle(), sizeof(buf), buf);
   lastWriteMillis = millis();
 }
 
@@ -496,7 +498,6 @@ static int handshake() {
   Serial.println("handshake done");
   // ready
   flattrim();
-  pilotState = PS_READY;
   return 1;
 }
 
@@ -553,10 +554,17 @@ void onDataWriteCallBack(const GattWriteCallbackParams *params) {
     handshake();
     return;
   }
-  // ACK for WRITE_REQ on IDX_COMMAND
-  //if (getCharsIdxByHandle(params->handle) == IDX_COMMAND) {
-  //  return;
-  //}
+
+  // ACK for flattrim
+  if (pilotState == PS_INIT) {
+    // ACK for WRITE_REQ on IDX_COMMAND
+    if (getCharsIdxByHandle(params->handle) == IDX_COMMAND) {
+      takeoff();
+      addlog(LT_TAKEOFF, 0);
+      pilotState = PS_EAST;
+    }
+    return;
+  }
 }
 
 /** @brief  read callback handle
@@ -636,16 +644,21 @@ void hvxCallBack(const GattHVXCallbackParams *params) {
 
 bool isFlying() {
   switch (flyingState) {
-    case FS_TAKINGOFF:
     case FS_HOVERING:
     case FS_FLYING:
-    case FS_LANDING:
       return true;
+    case FS_TAKINGOFF:
+    case FS_LANDING:
+      return false;
     case FS_LANDED:
     case FS_EMERGENCY:
     default:
       return false;
   }
+}
+
+void periodicCallback() {
+  triggerSensorPolling = true;
 }
 
 void setupSensors() {
@@ -655,7 +668,7 @@ void setupSensors() {
   Wire.begin();
 
   if (! vcnl.begin()){
-    Serial.println("Sensor not found :(");
+    Serial.println("VCNL4010 Sensor not found :(");
     while (1);
   }
   // disable proximity sensing. use ambient sensing only
@@ -680,6 +693,7 @@ void setup() {
   Serial.begin(9600);
   setupSensors();
 
+  ticker.attach_us(periodicCallback, SENSING_INTERVAL * 1000);
   ble.init();
   ble.onConnection(connectionCallBack);
   ble.onDisconnection(disconnectionCallBack);
@@ -792,145 +806,146 @@ int16_t updateTraceState(uint16_t ambient) {
   return 0;
 }
 
-void loop() {
+void senseAndPilot() {
+  static uint8_t prevNearWall = 0;
   static bool req_land = false;
   int8_t req_vertical_movement = 0;
   int8_t req_forward = 0;
   int16_t req_turn = 0;
   enum PILOT_STATE req_pilotState = pilotState;
 
-  if (millis() - prevSensingMillis > SENSING_INTERVAL) {
-    prevSensingMillis = millis();
-    uint16_t mm_up = tof_up.readRangeSingleMillimeters();
-    uint16_t mm_front = tof_front.readRangeSingleMillimeters();
-    uint16_t ambient = vcnl.readAmbient();
-    //Serial.print("sensing ms: "); Serial.println(millis() - prevSensingMillis); // ex.164ms (readAmbient: 117ms, tof: 23ms)
+  uint16_t mm_up = tof_up.readRangeSingleMillimeters();
+  uint16_t mm_front = tof_front.readRangeSingleMillimeters();
+  uint16_t ambient = vcnl.readAmbient();
+  //Serial.print("sensing ms: "); Serial.println(millis() - prevSensingMillis); // ex.164ms (readAmbient: 117ms, tof: 23ms)
 
-    if (!tof_up.timeoutOccurred()) {
-      //Serial.print("up ToF mm: "); Serial.println(mm_up); // from ceiling
-      if (mm_up > UP_MAX) { // too far from ceiling
-        Serial.print("up ");
-        req_vertical_movement = UP_VALUE; // up
-      } else if (mm_up < UP_MIN) { // too near from ceiling
-        Serial.print("down ");
-        req_vertical_movement = -UP_VALUE; // down
+  if (!tof_up.timeoutOccurred()) {
+    //Serial.print("up ToF mm: "); Serial.println(mm_up); // from ceiling
+    if (mm_up > UP_MAX) { // too far from ceiling
+      Serial.print("up ");
+      req_vertical_movement = UP_VALUE; // up
+    } else if (mm_up < UP_MIN) { // too near from ceiling
+      Serial.print("down ");
+      req_vertical_movement = -UP_VALUE; // down
+    }
+  }
+  if (!tof_front.timeoutOccurred()) {
+    //Serial.print("front ToF mm: "); Serial.println(mm_front); // from wall
+    if (isFlying()) {
+      if (mm_front > FRONT_MIN) {
+        Serial.print("forward ");
+        req_forward = FORWARD_VALUE;
+        prevNearWall = 0;
+      } else { // too near from wall
+        if (prevNearWall == 0) {
+          Serial.print("++prevNearWall ");
+          ++prevNearWall;
+        } else { // if near wall sensor value continues
+          switch (pilotState) {
+            case PS_WEST:
+              Serial.print("w2e ");
+              req_turn = 90;
+              req_pilotState = PS_W2E;
+              break;
+            case PS_EAST:
+              Serial.print("e2w ");
+              req_turn = -90;
+              req_pilotState = PS_E2W;
+              break;
+            case PS_W2E:
+            case PS_E2W:
+            default:
+              Serial.print("land ");
+              req_land = true;
+              break;
+          }
+        }
       }
     }
-    if (!tof_front.timeoutOccurred()) {
-      //Serial.print("front ToF mm: "); Serial.println(mm_front); // from wall
-      if (isFlying()) {
-        if (mm_front > FRONT_MIN) {
-          Serial.print("forward ");
-          req_forward = FORWARD_VALUE;
+  }
+
+  Serial.print("ambient="); Serial.println(ambient);
+  addlog(LT_LIGHT, ambient); //DEBUG
+  if (isFlying()) {
+    // PS_W2E/E2W: if find light line, turn_degrees(90/-90)
+    if (pilotState == PS_W2E || pilotState == PS_E2W) {
+      enum FINDLIGHT_STATE prev = findlightState;
+      findlightState = getNewFindlightState(findlightState, ambient);
+      if (prev == FS_APPROACHING_LIGHT && findlightState == FS_ONLIGHT) {
+        if (pilotState == PS_W2E) {
+          Serial.print("east ");
+          req_turn = 90;
+          req_pilotState = PS_EAST;
+        } else { // PS_E2W
+          Serial.print("west ");
+          req_turn = -90;
+          req_pilotState = PS_WEST;
+        }
+      }
+    } else if (req_turn == 0 && (pilotState == PS_WEST || pilotState == PS_EAST) && !waitingForward) {
+      // PS_WEST/EAST: trace light line
+      req_turn = updateTraceState(ambient);
+      if (req_turn != 0) {
+        waitingForward = true;
+      }
+    }
+  }
+
+  // XXX: rewrite to use state machine and sensor events
+  if (isFlying()) {
+    if (req_land) { // land is high priority
+      land();
+      addlog(LT_LAND, 0);
+      pilotState = PS_LAND;
+    } else if (req_turn != 0) {
+      turn_degrees(req_turn);
+      addlog(LT_TURN, req_turn);
+      if (pilotState != req_pilotState) { // turn 90/-90 degrees
+          pilotState = req_pilotState;
           prevNearWall = 0;
-        } else { // too near from wall
-          if (prevNearWall == 0) {
-            Serial.print("++prevNearWall ");
-            ++prevNearWall;
-          } else { // if near wall sensor value continues
-            switch (pilotState) {
-              case PS_WEST:
-                Serial.print("w2e ");
-                req_turn = 90;
-                req_pilotState = PS_W2E;
-                break;
-              case PS_EAST:
-                Serial.print("e2w ");
-                req_turn = -90;
-                req_pilotState = PS_E2W;
-                break;
-              case PS_W2E:
-              case PS_E2W:
-              default:
-                Serial.print("land ");
-                req_land = true;
-                break;
-            }
+          prevDarker = 0;
+          prevLighter = 0;
+          if (pilotState == PS_W2E || pilotState == PS_E2W) {
+            Serial.println("leaving_light ");
+            findlightState = FS_LEAVING_LIGHT;
+          } else { // PS_EAST/WEST
+            // reset trace state and related vars
+            traceState = TS_ONLIGHT;
+            recentReqTraceState = (pilotState == PS_EAST) ? TS_RIGHT : TS_LEFT;
           }
-        }
       }
-    }
-
-    Serial.print("ambient="); Serial.println(ambient);
-    addlog(LT_LIGHT, ambient); //DEBUG
-    if (isFlying()) {
-      // PS_W2E/E2W: if find light line, turn_degrees(90/-90)
-      if (pilotState == PS_W2E || pilotState == PS_E2W) {
-        enum FINDLIGHT_STATE prev = findlightState;
-        findlightState = getNewFindlightState(findlightState, ambient);
-        if (prev == FS_APPROACHING_LIGHT && findlightState == FS_ONLIGHT) {
-          if (pilotState == PS_W2E) {
-            Serial.print("east ");
-            req_turn = 90;
-            req_pilotState = PS_EAST;
-          } else { // PS_E2W
-            Serial.print("west ");
-            req_turn = -90;
-            req_pilotState = PS_WEST;
-          }
-        }
-      } else if (req_turn == 0 && (pilotState == PS_WEST || pilotState == PS_EAST) && !waitingForward) {
-        // PS_WEST/EAST: trace light line
-        req_turn = updateTraceState(ambient);
-        if (req_turn != 0) {
-          waitingForward = true;
-        }
-      }
-    }
-
-    // XXX: rewrite to use state machine and sensor events
-    if (isFlying()) {
-      if (req_land) { // land is high priority
-        land();
-        addlog(LT_LAND, 0);
-        pilotState = PS_LAND;
-      } else if (req_turn != 0) {
-        turn_degrees(req_turn);
-        addlog(LT_TURN, req_turn);
-        if (pilotState != req_pilotState) { // turn 90/-90 degrees
-            pilotState = req_pilotState;
-            prevNearWall = 0;
-            prevDarker = 0;
-            prevLighter = 0;
-            if (pilotState == PS_W2E || pilotState == PS_E2W) {
-              Serial.println("leaving_light ");
-              findlightState = FS_LEAVING_LIGHT;
-            } else { // PS_EAST/WEST
-              // reset trace state and related vars
-              traceState = TS_ONLIGHT;
-              recentReqTraceState = (pilotState == PS_EAST) ? TS_RIGHT : TS_LEFT;
-            }
-        }
-      } else if (req_forward != 0 || req_vertical_movement != 0) {
-        fly(0, req_forward, 0, req_vertical_movement);
-        addlog(LT_FLY, req_vertical_movement + req_forward/FORWARD_VALUE);
-        if (req_forward != 0) {
-          waitingForward = false;
-        }
-      }
-    } else { // !isFlying()
-      if (pilotState == PS_READY) {
-        takeoff();
-        addlog(LT_TAKEOFF, 0);
-        pilotState = PS_EAST;
+    } else if (req_forward != 0 || req_vertical_movement != 0) {
+      fly(0, req_forward, 0, req_vertical_movement);
+      addlog(LT_FLY, req_vertical_movement + req_forward/FORWARD_VALUE);
+      if (req_forward != 0) {
+        waitingForward = false;
       }
     }
   }
+}
 
-  if (millis() - prevTemperatureMillis > 2000) {
-    prevTemperatureMillis = millis();
-    float temp = adt7410.readTemperature();
-    addlog(LT_TEMPERATURE, temp * 100);
-    //Serial.print("temperature: "); Serial.println(temp, 1);
+void loop() {
+  static uint32_t prevTemperatureMillis = 0;
+
+  if (triggerSensorPolling) {
+    triggerSensorPolling = false;
+    senseAndPilot();
+
+    if (millis() - prevTemperatureMillis > 2000) {
+      prevTemperatureMillis = millis();
+      float temp = adt7410.readTemperature();
+      addlog(LT_TEMPERATURE, temp * 100);
+      //Serial.print("temperature: "); Serial.println(temp, 1);
+    }
+
+    // avoid disconnect after 5 seconds of inactivity
+    // (lastWriteMillis may be updated in land()/fly()/turn_degrees())
+    if (lastWriteMillis > 0 && millis() - lastWriteMillis > 4000) {
+      ping();
+    }
+  } else {
+    ble.waitForEvent(); // enter sleep and wait BLE event
   }
-
-  // avoid disconnect after 5 seconds of inactivity
-  // (lastWriteMillis may be updated in land()/fly()/turn_degrees())
-  if (lastWriteMillis > 0 && millis() - lastWriteMillis > 4000) {
-    ping();
-  }
-
-  ble.waitForEvent();
 
   if (!isFlying()) {
     if (Serial.available()) {
