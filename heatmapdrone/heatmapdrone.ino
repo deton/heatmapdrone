@@ -56,12 +56,12 @@ static bool waitingForward = false; // waiting fly forward? (after left/right)
 const uint16_t TURN_RIGHT_VALUE = 20; // [degree]
 
 /// sensors
-const uint16_t SENSING_INTERVAL = 1000; // [ms]
+const uint16_t SENSING_INTERVAL = 2000; // [ms]
 const uint16_t FORWARD_VALUE = 100; // [-100,100]
 const uint16_t UP_VALUE = 50; // [-100,100]
 const int8_t DRIFT_OFFSET = -5; // offset to fix drift on forward [-100,100]
 
-const uint16_t FRONT_MIN = 2500; // 2.5m from wall
+const uint16_t FRONT_MIN = 2000; // 2m from wall (VL53L0X max sensing 2m)
 const uint16_t UP_MIN = 300; // 30cm from ceiling
 const uint16_t UP_MAX = 1000; // 1m from ceiling
 
@@ -464,6 +464,13 @@ static void forward() {
   fly(0, FORWARD_VALUE, 0, 0);
 }
 
+static void turn_degrees(int16_t degrees) {
+  // yaw:100 = degree:270
+  int8_t yaw = 100 * degrees / 270;
+  fly(0, 0, yaw, 0);
+}
+
+#if 0
 // Turn the mambo the specified number of degrees [-180, 180]
 static void turn_degrees(int16_t degrees) {
   Serial.print("turn_degrees "); Serial.println(degrees);
@@ -476,6 +483,7 @@ static void turn_degrees(int16_t degrees) {
   ble.gattClient().write(GattClient::GATT_OP_WRITE_CMD, dchars[IDX_COMMAND].getConnectionHandle(), dchars[IDX_COMMAND].getValueHandle(), sizeof(buf), buf);
   lastWriteMillis = millis();
 }
+#endif
 
 // write some command to avoid disconnect after 5 seconds of inactivity
 static void ping() {
@@ -813,17 +821,10 @@ int16_t updateTraceState(uint16_t ambient) {
 void senseAndPilot() {
   static uint8_t prevNearWall = 0;
   static bool req_land = false;
-  static bool req_flattrim = false;
   int8_t req_vertical_movement = 0;
   int8_t req_forward = 0;
   int16_t req_turn = 0;
   enum PILOT_STATE req_pilotState = pilotState;
-
-  if (req_flattrim) {
-    req_flattrim = false;
-    flattrim();
-    return;
-  }
 
   uint16_t mm_up = tof_up.readRangeSingleMillimeters();
   uint16_t mm_front = tof_front.readRangeSingleMillimeters();
@@ -920,7 +921,6 @@ void senseAndPilot() {
             Serial.println("leaving_light ");
             findlightState = FS_LEAVING_LIGHT;
           } else { // PS_EAST/WEST
-            req_flattrim = true; // to reduce drift on forward
             // reset trace state and related vars
             traceState = TS_ONLIGHT;
             recentReqTraceState = (pilotState == PS_EAST) ? TS_RIGHT : TS_LEFT;
