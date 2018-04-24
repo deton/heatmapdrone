@@ -56,10 +56,10 @@ static bool waitingForward = false; // waiting fly forward? (after left/right)
 const uint16_t TURN_RIGHT_VALUE = 20; // [degree]
 
 /// sensors
-const uint16_t SENSING_INTERVAL = 800; // [ms]
-const uint16_t FORWARD_VALUE = 80; // [-100,100]
+const uint16_t SENSING_INTERVAL = 1000; // [ms]
+const uint16_t FORWARD_VALUE = 100; // [-100,100]
 const uint16_t UP_VALUE = 50; // [-100,100]
-const uint16_t DRIFT_OFFSET = -5; // offset to fix drift on forward [-100,100]
+const int8_t DRIFT_OFFSET = -5; // offset to fix drift on forward [-100,100]
 
 const uint16_t FRONT_MIN = 2500; // 2.5m from wall
 const uint16_t UP_MIN = 300; // 30cm from ceiling
@@ -565,7 +565,7 @@ void onDataWriteCallBack(const GattWriteCallbackParams *params) {
     if (getCharsIdxByHandle(params->handle) == IDX_COMMAND) {
       takeoff();
       addlog(LT_TAKEOFF, 0);
-      pilotState = PS_EAST;
+      pilotState = PS_WEST;
     }
     return;
   }
@@ -813,10 +813,17 @@ int16_t updateTraceState(uint16_t ambient) {
 void senseAndPilot() {
   static uint8_t prevNearWall = 0;
   static bool req_land = false;
+  static bool req_flattrim = false;
   int8_t req_vertical_movement = 0;
   int8_t req_forward = 0;
   int16_t req_turn = 0;
   enum PILOT_STATE req_pilotState = pilotState;
+
+  if (req_flattrim) {
+    req_flattrim = false;
+    flattrim();
+    return;
+  }
 
   uint16_t mm_up = tof_up.readRangeSingleMillimeters();
   uint16_t mm_front = tof_front.readRangeSingleMillimeters();
@@ -913,6 +920,7 @@ void senseAndPilot() {
             Serial.println("leaving_light ");
             findlightState = FS_LEAVING_LIGHT;
           } else { // PS_EAST/WEST
+            req_flattrim = true; // to reduce drift on forward
             // reset trace state and related vars
             traceState = TS_ONLIGHT;
             recentReqTraceState = (pilotState == PS_EAST) ? TS_RIGHT : TS_LEFT;
