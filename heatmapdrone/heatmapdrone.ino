@@ -56,10 +56,12 @@ static bool waitingForward = false; // waiting fly forward? (after left/right)
 const uint16_t TURN_RIGHT_VALUE = 20; // [degree]
 
 /// sensors
-const uint16_t SENSING_INTERVAL = 2000; // [ms]
-const uint16_t FORWARD_VALUE = 100; // [-100,100]
+const uint16_t SENSING_INTERVAL = 200; // [ms]
+const uint16_t FORWARD_VALUE = 10; // [-100,100]
 const uint16_t UP_VALUE = 50; // [-100,100]
-const int8_t DRIFT_OFFSET = -5; // offset to fix drift on forward [-100,100]
+const int8_t DRIFT_OFFSET = -1; // offset to fix drift on forward [-100,100]
+const uint32_t TURNWAIT_90 = 250;
+const uint32_t TURNWAIT_RIGHT = TURNWAIT_90 * TURN_RIGHT_VALUE / 90;
 
 const uint16_t FRONT_MIN = 2000; // 2m from wall (VL53L0X max sensing 2m)
 const uint16_t UP_MIN = 300; // 30cm from ceiling
@@ -68,7 +70,7 @@ const uint16_t UP_MAX = 1000; // 1m from ceiling
 const uint8_t XSHUT_PIN = D4;
 const uint8_t TOF_UP_NEWADDR = 42; // TOF_FRONT = 41 (default)
 
-static volatile bool triggerSensorPolling = false;
+static volatile int8_t triggerSensorPolling = 0;
 
 Adafruit_VCNL4010 vcnl;
 VL53L0X tof_up;
@@ -464,13 +466,6 @@ static void forward() {
   fly(0, FORWARD_VALUE, 0, 0);
 }
 
-static void turn_degrees(int16_t degrees) {
-  // yaw:100 = degree:270
-  int8_t yaw = 100 * degrees / 270;
-  fly(0, 0, yaw, 0);
-}
-
-#if 0
 // Turn the mambo the specified number of degrees [-180, 180]
 static void turn_degrees(int16_t degrees) {
   Serial.print("turn_degrees "); Serial.println(degrees);
@@ -483,7 +478,6 @@ static void turn_degrees(int16_t degrees) {
   ble.gattClient().write(GattClient::GATT_OP_WRITE_CMD, dchars[IDX_COMMAND].getConnectionHandle(), dchars[IDX_COMMAND].getValueHandle(), sizeof(buf), buf);
   lastWriteMillis = millis();
 }
-#endif
 
 // write some command to avoid disconnect after 5 seconds of inactivity
 static void ping() {
@@ -670,7 +664,9 @@ bool isFlying() {
 }
 
 void periodicCallback() {
-  triggerSensorPolling = true;
+  if (triggerSensorPolling == 0) {
+    triggerSensorPolling = 1;
+  }
 }
 
 void setupSensors() {
@@ -821,10 +817,17 @@ int16_t updateTraceState(uint16_t ambient) {
 void senseAndPilot() {
   static uint8_t prevNearWall = 0;
   static bool req_land = false;
+  static uint32_t reqTurnMillis = 0;
+  static uint32_t reqTurnWait = TURNWAIT_90;
   int8_t req_vertical_movement = 0;
   int8_t req_forward = 0;
   int16_t req_turn = 0;
   enum PILOT_STATE req_pilotState = pilotState;
+
+  if (reqTurnMillis > 0 && millis() - reqTurnMillis < reqTurnWait) {
+    return;
+  }
+  reqTurnMillis = 0;
 
   uint16_t mm_up = tof_up.readRangeSingleMillimeters();
   uint16_t mm_front = tof_front.readRangeSingleMillimeters();
@@ -912,11 +915,13 @@ void senseAndPilot() {
     } else if (req_turn != 0) {
       turn_degrees(req_turn);
       addlog(LT_TURN, req_turn);
+      reqTurnMillis = millis();
       if (pilotState != req_pilotState) { // turn 90/-90 degrees
           pilotState = req_pilotState;
           prevNearWall = 0;
           prevDarker = 0;
           prevLighter = 0;
+          reqTurnWait = TURNWAIT_90;
           if (pilotState == PS_W2E || pilotState == PS_E2W) {
             Serial.println("leaving_light ");
             findlightState = FS_LEAVING_LIGHT;
@@ -925,6 +930,8 @@ void senseAndPilot() {
             traceState = TS_ONLIGHT;
             recentReqTraceState = (pilotState == PS_EAST) ? TS_RIGHT : TS_LEFT;
           }
+      } else { // turn right/left
+          reqTurnWait = TURNWAIT_RIGHT;
       }
     } else if (req_forward != 0 || req_vertical_movement != 0) {
       fly(DRIFT_OFFSET, req_forward, 0, req_vertical_movement);
@@ -939,9 +946,10 @@ void senseAndPilot() {
 void loop() {
   static uint32_t prevTemperatureMillis = 0;
 
-  if (triggerSensorPolling) {
-    triggerSensorPolling = false;
+  if (triggerSensorPolling == 1) {
+    triggerSensorPolling = -1; // sensing
     senseAndPilot();
+    triggerSensorPolling = 0;
 
     if (millis() - prevTemperatureMillis > 2000) {
       prevTemperatureMillis = millis();
