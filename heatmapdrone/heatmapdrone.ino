@@ -42,6 +42,7 @@ enum FINDLIGHT_STATE {
 volatile enum FINDLIGHT_STATE findlightState = FS_ONLIGHT;
 volatile uint8_t prevDarker = 0;
 volatile uint8_t prevLighter = 0;
+
 const uint16_t AMBIENT_DARK_THRESHOLD = 2400; // XXX
 const uint16_t AMBIENT_LIGHT_THRESHOLD = 3900; // XXX
 
@@ -51,17 +52,37 @@ enum TRACE_STATE {
 };
 volatile enum TRACE_STATE traceState = TS_ONLIGHT;
 volatile enum TRACE_STATE recentReqTraceState = TS_ONLIGHT;
-static bool waitingForward = false; // waiting fly forward? (after left/right)
+volatile int16_t waitingForward = 0; // waiting fly forward? (after left/right)
+const int16_t WAIT_FORWARD = 300; // [ms]
 
+const uint16_t PILOT_INTERVAL = 50; // [ms]
+const uint16_t FORWARD_VALUE = 10; // [-100,100]
+const uint16_t UP_VALUE = 40; // [-100,100]
 const uint16_t TURN_RIGHT_VALUE = 20; // [degree]
+const int8_t DRIFT_OFFSET = 0; // offset to fix drift on forward [-100,100]
+const uint32_t TURNWAIT_90 = 300; // [ms]
+const uint32_t TURNWAIT_RIGHT = TURNWAIT_90 * TURN_RIGHT_VALUE / 90; // [ms]
+
+struct PilotRequest {
+  bool land;
+  int8_t forward;
+  int8_t vertical_movement;
+  int16_t turn;
+  enum PILOT_STATE pilotState;
+};
+
+volatile bool keep_land = false;
+volatile int8_t keep_forward = 0; // continue sending fly forward
+volatile int8_t keep_vertical_movement = 0;
+
+volatile uint8_t prevNearWall = 0;
+volatile uint32_t reqTurnMillis = 0; // turn start time [ms]
+volatile uint32_t reqTurnWait = TURNWAIT_90; // [ms]
 
 /// sensors
-const uint16_t SENSING_INTERVAL = 200; // [ms]
-const uint16_t FORWARD_VALUE = 10; // [-100,100]
-const uint16_t UP_VALUE = 50; // [-100,100]
-const int8_t DRIFT_OFFSET = -1; // offset to fix drift on forward [-100,100]
-const uint32_t TURNWAIT_90 = 250;
-const uint32_t TURNWAIT_RIGHT = TURNWAIT_90 * TURN_RIGHT_VALUE / 90;
+// XXX: sensing takes 164ms.  If interval is 200, no additional pilot (forward)
+//      request is sent and drift increase
+const uint16_t SENSING_INTERVAL = 300; // [ms]
 
 const uint16_t FRONT_MIN = 2000; // 2m from wall (VL53L0X max sensing 2m)
 const uint16_t UP_MIN = 300; // 30cm from ceiling
@@ -71,6 +92,7 @@ const uint8_t XSHUT_PIN = D4;
 const uint8_t TOF_UP_NEWADDR = 42; // TOF_FRONT = 41 (default)
 
 static volatile int8_t triggerSensorPolling = 0;
+static volatile int8_t triggerPilotPolling = 0;
 
 Adafruit_VCNL4010 vcnl;
 VL53L0X tof_up;
@@ -87,10 +109,12 @@ struct LOGITEM {
 static uint16_t logcount = 0;
 const uint8_t LT_TEMPERATURE = 0;
 const uint8_t LT_LIGHT = 1;
+const uint8_t LT_FRONT = 2;
+const uint8_t LT_UP = 3;
 const uint8_t LT_TAKEOFF = 10;
-const uint8_t LT_TURN = 11;
-const uint8_t LT_FLY = 12;
-const uint8_t LT_LAND = 13;
+const uint8_t LT_LAND = 11;
+const uint8_t LT_TURN = 12;
+const uint8_t LT_FLY = 13;
 
 void addlog(uint8_t type, int16_t value) {
   logdata[logcount].ds = millis() / 100;
@@ -108,7 +132,8 @@ void addlog(uint8_t type, int16_t value) {
 // https://github.com/voodootikigod/node-rolling-spider
 
 BLE ble;
-Ticker ticker;
+Ticker sensingTicker;
+Ticker pilotTicker;
 
 // MD_CLASSES
 // https://github.com/Parrot-Developers/arsdk-xml/blob/master/xml/minidrone.xml
@@ -462,10 +487,6 @@ static void fly(int8_t roll, int8_t pitch, int8_t yaw, int8_t vertical) {
   lastWriteMillis = millis();
 }
 
-static void forward() {
-  fly(0, FORWARD_VALUE, 0, 0);
-}
-
 // Turn the mambo the specified number of degrees [-180, 180]
 static void turn_degrees(int16_t degrees) {
   Serial.print("turn_degrees "); Serial.println(degrees);
@@ -663,9 +684,15 @@ bool isFlying() {
   }
 }
 
-void periodicCallback() {
+void periodicSensingCallback() {
   if (triggerSensorPolling == 0) {
     triggerSensorPolling = 1;
+  }
+}
+
+void periodicPilotCallback() {
+  if (triggerPilotPolling == 0) {
+    triggerPilotPolling = 1;
   }
 }
 
@@ -701,7 +728,8 @@ void setup() {
   Serial.begin(9600);
   setupSensors();
 
-  ticker.attach_us(periodicCallback, SENSING_INTERVAL * 1000);
+  sensingTicker.attach_us(periodicSensingCallback, SENSING_INTERVAL * 1000);
+  pilotTicker.attach_us(periodicPilotCallback, PILOT_INTERVAL * 1000);
   ble.init();
   ble.onConnection(connectionCallBack);
   ble.onDisconnection(disconnectionCallBack);
@@ -814,141 +842,178 @@ int16_t updateTraceState(uint16_t ambient) {
   return 0;
 }
 
-void senseAndPilot() {
-  static uint8_t prevNearWall = 0;
-  static bool req_land = false;
-  static uint32_t reqTurnMillis = 0;
-  static uint32_t reqTurnWait = TURNWAIT_90;
-  int8_t req_vertical_movement = 0;
-  int8_t req_forward = 0;
-  int16_t req_turn = 0;
-  enum PILOT_STATE req_pilotState = pilotState;
+int8_t senseForVerticalMovement() {
+  if (!isFlying()) {
+    return 0;
+  }
+
+  uint16_t mm_up = tof_up.readRangeSingleMillimeters();
+  if (tof_up.timeoutOccurred()) {
+    return 0;
+  }
+  //Serial.print("up ToF mm: "); Serial.println(mm_up); // from ceiling
+  //addlog(LT_UP, mm_up); //DEBUG
+  if (mm_up > UP_MAX) { // too far from ceiling
+    Serial.print("up ");
+    return UP_VALUE; // up
+  } else if (mm_up < UP_MIN) { // too near from ceiling
+    Serial.print("down ");
+    return -UP_VALUE; // down
+  }
+  return 0;
+}
+
+void senseFront(struct PilotRequest *req) {
+  if (!isFlying()) {
+    return;
+  }
+
+  uint16_t mm_front = tof_front.readRangeSingleMillimeters();
+  if (tof_front.timeoutOccurred()) {
+    return;
+  }
+  //Serial.print("front ToF mm: "); Serial.println(mm_front); // from wall
+  if (mm_front > FRONT_MIN) {
+    Serial.print("forward ");
+    prevNearWall = 0;
+    req->forward = FORWARD_VALUE;
+    return;
+  }
+  addlog(LT_FRONT, mm_front); //DEBUG
+
+  // too near from wall
+  if (prevNearWall < 5) {
+    Serial.print("++prevNearWall ");
+    ++prevNearWall;
+    req->forward = 0; // stop forward
+    return;
+  }
+
+  // if near wall sensor value continues
+  switch (pilotState) {
+    case PS_WEST:
+      Serial.print("w2e ");
+      req->turn = 90;
+      req->pilotState = PS_W2E;
+      break;
+    case PS_EAST:
+      Serial.print("e2w ");
+      req->turn = -90;
+      req->pilotState = PS_E2W;
+      break;
+    case PS_W2E:
+    case PS_E2W:
+    default:
+      Serial.print("land ");
+      req->land = true;
+      break;
+  }
+}
+
+void senseForPilot(struct PilotRequest *req) {
+  req->pilotState = pilotState;
 
   if (reqTurnMillis > 0 && millis() - reqTurnMillis < reqTurnWait) {
     return;
   }
   reqTurnMillis = 0;
 
-  uint16_t mm_up = tof_up.readRangeSingleMillimeters();
-  uint16_t mm_front = tof_front.readRangeSingleMillimeters();
+  req->vertical_movement = senseForVerticalMovement();
+  senseFront(req);
+
   uint16_t ambient = vcnl.readAmbient();
   //Serial.print("sensing ms: "); Serial.println(millis() - prevSensingMillis); // ex.164ms (readAmbient: 117ms, tof: 23ms)
-
-  if (!tof_up.timeoutOccurred()) {
-    //Serial.print("up ToF mm: "); Serial.println(mm_up); // from ceiling
-    if (mm_up > UP_MAX) { // too far from ceiling
-      Serial.print("up ");
-      req_vertical_movement = UP_VALUE; // up
-    } else if (mm_up < UP_MIN) { // too near from ceiling
-      Serial.print("down ");
-      req_vertical_movement = -UP_VALUE; // down
-    }
-  }
-  if (!tof_front.timeoutOccurred()) {
-    //Serial.print("front ToF mm: "); Serial.println(mm_front); // from wall
-    if (isFlying()) {
-      if (mm_front > FRONT_MIN) {
-        Serial.print("forward ");
-        req_forward = FORWARD_VALUE;
-        prevNearWall = 0;
-      } else { // too near from wall
-        if (prevNearWall == 0) {
-          Serial.print("++prevNearWall ");
-          ++prevNearWall;
-        } else { // if near wall sensor value continues
-          switch (pilotState) {
-            case PS_WEST:
-              Serial.print("w2e ");
-              req_turn = 90;
-              req_pilotState = PS_W2E;
-              break;
-            case PS_EAST:
-              Serial.print("e2w ");
-              req_turn = -90;
-              req_pilotState = PS_E2W;
-              break;
-            case PS_W2E:
-            case PS_E2W:
-            default:
-              Serial.print("land ");
-              req_land = true;
-              break;
-          }
-        }
-      }
-    }
-  }
+  // TODO: set VCNL4010 to continuous mode for short time sensing
 
   Serial.print("ambient="); Serial.println(ambient);
-  addlog(LT_LIGHT, ambient); //DEBUG
   if (isFlying()) {
     // PS_W2E/E2W: if find light line, turn_degrees(90/-90)
+    // XXX: rewrite to use state machine and sensor events
     if (pilotState == PS_W2E || pilotState == PS_E2W) {
+      addlog(LT_LIGHT, ambient); //DEBUG
       enum FINDLIGHT_STATE prev = findlightState;
       findlightState = getNewFindlightState(findlightState, ambient);
       if (prev == FS_APPROACHING_LIGHT && findlightState == FS_ONLIGHT) {
         if (pilotState == PS_W2E) {
           Serial.print("east ");
-          req_turn = 90;
-          req_pilotState = PS_EAST;
+          req->turn = 90;
+          req->pilotState = PS_EAST;
         } else { // PS_E2W
           Serial.print("west ");
-          req_turn = -90;
-          req_pilotState = PS_WEST;
+          req->turn = -90;
+          req->pilotState = PS_WEST;
         }
+        return;
       }
-    } else if (req_turn == 0 && (pilotState == PS_WEST || pilotState == PS_EAST) && !waitingForward) {
+    } else if (req->turn == 0 && (pilotState == PS_WEST || pilotState == PS_EAST) && waitingForward <= 0) {
+      addlog(LT_LIGHT, ambient); //DEBUG
       // PS_WEST/EAST: trace light line
-      req_turn = updateTraceState(ambient);
-      if (req_turn != 0) {
-        waitingForward = true;
+      req->turn = updateTraceState(ambient);
+      if (req->turn != 0) {
+        waitingForward = WAIT_FORWARD;
+        return;
       }
     }
   }
+}
 
-  // XXX: rewrite to use state machine and sensor events
-  if (isFlying()) {
-    if (req_land) { // land is high priority
-      land();
-      addlog(LT_LAND, 0);
-      pilotState = PS_LAND;
-    } else if (req_turn != 0) {
-      turn_degrees(req_turn);
-      addlog(LT_TURN, req_turn);
-      reqTurnMillis = millis();
-      if (pilotState != req_pilotState) { // turn 90/-90 degrees
-          pilotState = req_pilotState;
-          prevNearWall = 0;
-          prevDarker = 0;
-          prevLighter = 0;
-          reqTurnWait = TURNWAIT_90;
-          if (pilotState == PS_W2E || pilotState == PS_E2W) {
-            Serial.println("leaving_light ");
-            findlightState = FS_LEAVING_LIGHT;
-          } else { // PS_EAST/WEST
-            // reset trace state and related vars
-            traceState = TS_ONLIGHT;
-            recentReqTraceState = (pilotState == PS_EAST) ? TS_RIGHT : TS_LEFT;
-          }
-      } else { // turn right/left
-          reqTurnWait = TURNWAIT_RIGHT;
-      }
-    } else if (req_forward != 0 || req_vertical_movement != 0) {
-      fly(DRIFT_OFFSET, req_forward, 0, req_vertical_movement);
-      addlog(LT_FLY, req_vertical_movement + req_forward/FORWARD_VALUE);
-      if (req_forward != 0) {
-        waitingForward = false;
-      }
+void sendPilotRequest(const struct PilotRequest& req) {
+  if (req.land) {
+    keep_land = true;
+  }
+  if (keep_land) { // land is high priority
+    land();
+    addlog(LT_LAND, 0);
+    pilotState = PS_LAND;
+    return;
+  }
+
+  if (req.turn != 0) {
+    keep_forward = 0;
+    keep_vertical_movement = 0;
+    turn_degrees(req.turn);
+    addlog(LT_TURN, req.turn);
+    reqTurnMillis = millis();
+    if (pilotState != req.pilotState) { // turn 90/-90 degrees
+        pilotState = req.pilotState;
+        prevNearWall = 0;
+        prevDarker = 0;
+        prevLighter = 0;
+        reqTurnWait = TURNWAIT_90;
+        if (pilotState == PS_W2E || pilotState == PS_E2W) {
+          Serial.println("leaving_light ");
+          findlightState = FS_LEAVING_LIGHT;
+        } else { // PS_EAST/WEST
+          // reset trace state and related vars
+          traceState = TS_ONLIGHT;
+          recentReqTraceState = (pilotState == PS_EAST) ? TS_RIGHT : TS_LEFT;
+        }
+    } else { // turn right/left
+        reqTurnWait = TURNWAIT_RIGHT;
+    }
+    return;
+  }
+  keep_forward = req.forward;
+  keep_vertical_movement = req.vertical_movement;
+
+  if (keep_forward != 0 || keep_vertical_movement != 0) {
+    fly(DRIFT_OFFSET, keep_forward, 0, keep_vertical_movement);
+    addlog(LT_FLY, keep_forward * 100 + keep_vertical_movement);
+    if (keep_forward != 0) {
+      waitingForward -= PILOT_INTERVAL;
     }
   }
 }
 
 void loop() {
   static uint32_t prevTemperatureMillis = 0;
+  struct PilotRequest req = {
+    keep_land, keep_forward, keep_vertical_movement, 0, pilotState
+  };
 
   if (triggerSensorPolling == 1) {
-    triggerSensorPolling = -1; // sensing
-    senseAndPilot();
+    triggerSensorPolling = -1; // now sensing
+    senseForPilot(&req);
     triggerSensorPolling = 0;
 
     if (millis() - prevTemperatureMillis > 2000) {
@@ -957,32 +1022,40 @@ void loop() {
       addlog(LT_TEMPERATURE, temp * 100);
       //Serial.print("temperature: "); Serial.println(temp, 1);
     }
+  }
+
+  if (triggerPilotPolling == 1) {
+    if (isFlying()) {
+      triggerPilotPolling = -1;
+      sendPilotRequest(req);
+    }
+    triggerPilotPolling = 0;
 
     // avoid disconnect after 5 seconds of inactivity
     // (lastWriteMillis may be updated in land()/fly()/turn_degrees())
     if (lastWriteMillis > 0 && millis() - lastWriteMillis > 4000) {
       ping();
     }
-  } else {
-    ble.waitForEvent(); // enter sleep and wait BLE event
+    return;
   }
 
-  if (!isFlying()) {
-    if (Serial.available()) {
-      int ch = Serial.read();
-      if (ch == 'r') { // output logdata
-        Serial.println();
-        Serial.print(SENSING_INTERVAL); Serial.print(",");
-        Serial.print(FORWARD_VALUE); Serial.print(",");
-        Serial.print(TURN_RIGHT_VALUE); Serial.println();
-        for (int i = 0; i < logcount; i++) {
-          struct LOGITEM *p = &logdata[i];
-          Serial.print(p->ds); Serial.print(",");
-          Serial.print(p->type); Serial.print(",");
-          Serial.print(p->value); Serial.println();
-        }
-        logcount = 0;
+  if (!isFlying() && Serial.available()) {
+    int ch = Serial.read();
+    if (ch == 'r') { // output logdata
+      Serial.println();
+      Serial.print(SENSING_INTERVAL); Serial.print(",");
+      Serial.print(FORWARD_VALUE); Serial.print(",");
+      Serial.print(TURN_RIGHT_VALUE); Serial.println();
+      for (int i = 0; i < logcount; i++) {
+        struct LOGITEM *p = &logdata[i];
+        Serial.print(p->ds); Serial.print(",");
+        Serial.print(p->type); Serial.print(",");
+        Serial.print(p->value); Serial.println();
       }
+      logcount = 0;
     }
+    return;
   }
+
+  ble.waitForEvent(); // enter sleep and wait BLE event
 }
