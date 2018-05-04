@@ -17,7 +17,7 @@
 //  |             |
 //  +-------------+  wall
 //      [south]
-// 
+//
 // pilot state:
 //  +-------------+
 //  |           ^ | PS_E2W
@@ -52,8 +52,8 @@ volatile enum TRACE_STATE recentReqTraceState = TS_ONLIGHT;
 volatile int16_t waitingForward = 0; // waiting fly forward? (after left/right)
 const int16_t WAIT_FORWARD = 300; // [ms]
 
-const uint16_t PILOT_INTERVAL = 50; // [ms]
-const uint16_t FORWARD_VALUE = 10; // [-100,100]
+const uint16_t PILOT_INTERVAL = 100; // [ms]
+const uint16_t FORWARD_VALUE = 20; // [-100,100]
 const uint16_t UP_VALUE = 40; // [-100,100]
 const uint16_t TURN_RIGHT_VALUE = 20; // [degree]
 const int8_t DRIFT_OFFSET = 0; // offset to fix drift on forward [-100,100]
@@ -98,10 +98,10 @@ FaBoTemperature adt7410;
 
 /// sensing log data
 struct LOGITEM {
-  uint16_t ds; // millis() in deci(0.1)-seconds //TODO:use uint8 by holding diff from prev
+  uint16_t ds; // millis() in deci(0.1)-seconds
   uint8_t type; // 0:temperature,(1:light), 10:takeoff,11:turn,12:fly,13:land
   int16_t value; // temperature*100 value/light/turn/fly value
-} logdata[1080]; // mambo battery works 9m=540s
+} logdata[2048]; // mambo battery works 9m=540s
 // len 5400: error "region RAM overflowed with stack"
 static uint16_t logcount = 0;
 const uint8_t LT_TEMPERATURE = 0;
@@ -239,6 +239,22 @@ void periodicPilotCallback() {
   }
 }
 
+void vcnl4010_setAmbientContinuousMode(bool enable) {
+  // XXX: Adafruit_VCNL4010.h has no API to set ambient parameter
+  uint8_t data = 0;
+  if (enable) {
+    data |= 1 << 7; // continuous conversion mode for faster measurements
+  }
+  data |= 1 << 4; // ambient light measurement rate. default: 2 samples/s
+  data |= 1 << 3; // auto offset compensation. default: enable
+  data |= 5; // averaging function (number of measurements per run). default: 32conv.
+
+  Wire.beginTransmission(VCNL4010_I2CADDR_DEFAULT);
+  Wire.write(VCNL4010_AMBIENTPARAMETER);
+  Wire.write(data);
+  Wire.endTransmission();
+}
+
 void setupSensors() {
   // https://forum.pololu.com/t/vl53l0x-maximum-sensors-on-i2c-arduino-bus/10845/7
   pinMode(XSHUT_PIN, OUTPUT); // LOW: shutdown tof_front
@@ -252,6 +268,9 @@ void setupSensors() {
   // disable proximity sensing. use ambient sensing only
   vcnl.setLEDcurrent(0);
   vcnl.setFrequency(VCNL4010_1_95);
+  // set VCNL4010 to continuous mode for short time sensing
+  // (default mode takes 117ms, continous mode takes 36ms)
+  vcnl4010_setAmbientContinuousMode(true);
 
   // change address to use multiple VL53L0X
   tof_up.setAddress(TOF_UP_NEWADDR);
@@ -466,8 +485,7 @@ void senseForPilot(struct PilotRequest *req) {
   senseFront(req);
 
   uint16_t ambient = vcnl.readAmbient();
-  //Serial.print("sensing ms: "); Serial.println(millis() - prevSensingMillis); // ex.164ms (readAmbient: 117ms, tof: 23ms)
-  // TODO: set VCNL4010 to continuous mode for short time sensing
+  //Serial.print("sensing ms: "); Serial.println(millis() - st); // ex.164ms (readAmbient: 117ms, tof: 23ms)
 
   Serial.print("ambient="); Serial.println(ambient);
   if (mambo.isFlying()) {
