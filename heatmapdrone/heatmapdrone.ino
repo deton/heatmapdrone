@@ -34,11 +34,12 @@ volatile enum PILOT_STATE pilotState = PS_INIT;
 
 // substate for finding ceiling light on PS_W2E/E2W state
 enum FINDLIGHT_STATE {
-  FS_LEAVING_LIGHT, FS_APPROACHING_LIGHT, FS_ONLIGHT
+  FS_LEAVING_LIGHT, FS_APPROACHING_LIGHT, FS_ONLIGHT_WAIT, FS_ONLIGHT
 };
 volatile enum FINDLIGHT_STATE findlightState = FS_ONLIGHT;
 volatile uint8_t prevDarker = 0;
 volatile uint8_t prevLighter = 0;
+const uint8_t ONLIGHT_WAIT_COUNT = 2;
 
 const uint16_t AMBIENT_DARK_THRESHOLD = 2400; // XXX
 const uint16_t AMBIENT_LIGHT_THRESHOLD = 3900; // XXX
@@ -52,12 +53,12 @@ volatile enum TRACE_STATE recentReqTraceState = TS_ONLIGHT;
 volatile int16_t waitingForward = 0; // waiting fly forward? (after left/right)
 const int16_t WAIT_FORWARD = 300; // [ms]
 
-const uint16_t PILOT_INTERVAL = 50; // [ms]
-const uint16_t FORWARD_VALUE = 15; // [-100,100]
+const uint16_t PILOT_INTERVAL = 40; // [ms]
+const uint16_t FORWARD_VALUE = 13; // [-100,100]
 const uint16_t UP_VALUE = 40; // [-100,100]
 const uint16_t TURN_RIGHT_VALUE = 20; // [degree]
 const int8_t DRIFT_OFFSET = 0; // offset to fix drift on forward [-100,100]
-const uint32_t TURNWAIT_90 = 500; // [ms]
+const uint32_t TURNWAIT_90 = 600; // [ms]
 const uint32_t TURNWAIT_RIGHT = TURNWAIT_90 * TURN_RIGHT_VALUE / 90; // [ms]
 
 struct PilotRequest {
@@ -343,6 +344,12 @@ enum FINDLIGHT_STATE getNewFindlightState(enum FINDLIGHT_STATE currentState, uin
         ++prevLighter;
         return currentState;
       }
+      Serial.print("onlightwait ");
+      return FS_ONLIGHT_WAIT;
+    case FS_ONLIGHT_WAIT:
+      if (++prevLighter < ONLIGHT_WAIT_COUNT) {
+        return currentState;
+      }
       Serial.print("onlight ");
       prevLighter = 0;
       return FS_ONLIGHT;
@@ -502,7 +509,11 @@ bool senseForPilot(struct PilotRequest *req) {
       addlog(LT_LIGHT, ambient); //DEBUG
       enum FINDLIGHT_STATE prev = findlightState;
       findlightState = getNewFindlightState(findlightState, ambient);
-      if (prev == FS_APPROACHING_LIGHT && findlightState == FS_ONLIGHT) {
+      if (findlightState == FS_ONLIGHT_WAIT) {
+        req->forward = 0; // stop forward. hover a while to reduce drift after turn
+        return true;
+      }
+      if (prev == FS_ONLIGHT_WAIT && findlightState == FS_ONLIGHT) {
         if (pilotState == PS_W2E) {
           Serial.print("east ");
           req->turn = 90;
@@ -514,6 +525,7 @@ bool senseForPilot(struct PilotRequest *req) {
         }
         return true;
       }
+#if 0
     } else if (req->turn == 0 && (pilotState == PS_WEST || pilotState == PS_EAST) && waitingForward <= 0) {
       addlog(LT_LIGHT, ambient); //DEBUG
       // PS_WEST/EAST: trace light line
@@ -522,6 +534,7 @@ bool senseForPilot(struct PilotRequest *req) {
         waitingForward = WAIT_FORWARD;
         return true;
       }
+#endif
     }
   }
   return hasReq;
