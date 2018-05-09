@@ -52,12 +52,12 @@ volatile enum TRACE_STATE recentReqTraceState = TS_ONLIGHT;
 volatile int16_t waitingForward = 0; // waiting fly forward? (after left/right)
 const int16_t WAIT_FORWARD = 300; // [ms]
 
-const uint16_t PILOT_INTERVAL = 100; // [ms]
-const uint16_t FORWARD_VALUE = 20; // [-100,100]
+const uint16_t PILOT_INTERVAL = 50; // [ms]
+const uint16_t FORWARD_VALUE = 15; // [-100,100]
 const uint16_t UP_VALUE = 40; // [-100,100]
 const uint16_t TURN_RIGHT_VALUE = 20; // [degree]
 const int8_t DRIFT_OFFSET = 0; // offset to fix drift on forward [-100,100]
-const uint32_t TURNWAIT_90 = 300; // [ms]
+const uint32_t TURNWAIT_90 = 500; // [ms]
 const uint32_t TURNWAIT_RIGHT = TURNWAIT_90 * TURN_RIGHT_VALUE / 90; // [ms]
 
 struct PilotRequest {
@@ -426,21 +426,21 @@ int8_t senseForVerticalMovement() {
   return 0;
 }
 
-void senseFront(struct PilotRequest *req) {
+bool senseFront(struct PilotRequest *req) {
   if (!mambo.isFlying()) {
-    return;
+    return false;
   }
 
   uint16_t mm_front = tof_front.readRangeSingleMillimeters();
   if (tof_front.timeoutOccurred()) {
-    return;
+    return false;
   }
   //Serial.print("front ToF mm: "); Serial.println(mm_front); // from wall
   if (mm_front > FRONT_MIN) {
     Serial.print("forward ");
     prevNearWall = 0;
     req->forward = FORWARD_VALUE;
-    return;
+    return true;
   }
   addlog(LT_FRONT, mm_front); //DEBUG
 
@@ -448,8 +448,12 @@ void senseFront(struct PilotRequest *req) {
   if (prevNearWall < 5) {
     Serial.print("++prevNearWall ");
     ++prevNearWall;
-    req->forward = 0; // stop forward
-    return;
+    //if (prevNearWall >= 3) {
+    //  req->forward = -FORWARD_VALUE; // backward
+    //} else {
+      req->forward = 0; // stop forward
+    //}
+    return true;
   }
 
   // if near wall sensor value continues
@@ -457,11 +461,13 @@ void senseFront(struct PilotRequest *req) {
     case PS_WEST:
       Serial.print("w2e ");
       req->turn = 90;
+      req->forward = 0;
       req->pilotState = PS_W2E;
       break;
     case PS_EAST:
       Serial.print("e2w ");
       req->turn = -90;
+      req->forward = 0;
       req->pilotState = PS_E2W;
       break;
     case PS_W2E:
@@ -471,18 +477,19 @@ void senseFront(struct PilotRequest *req) {
       req->land = true;
       break;
   }
+  return true;
 }
 
-void senseForPilot(struct PilotRequest *req) {
+bool senseForPilot(struct PilotRequest *req) {
   req->pilotState = pilotState;
 
   if (reqTurnMillis > 0 && millis() - reqTurnMillis < reqTurnWait) {
-    return;
+    return false;
   }
   reqTurnMillis = 0;
 
   req->vertical_movement = senseForVerticalMovement();
-  senseFront(req);
+  bool hasReq = senseFront(req);
 
   uint16_t ambient = vcnl.readAmbient();
   //Serial.print("sensing ms: "); Serial.println(millis() - st); // ex.164ms (readAmbient: 117ms, tof: 23ms)
@@ -505,7 +512,7 @@ void senseForPilot(struct PilotRequest *req) {
           req->turn = -90;
           req->pilotState = PS_WEST;
         }
-        return;
+        return true;
       }
     } else if (req->turn == 0 && (pilotState == PS_WEST || pilotState == PS_EAST) && waitingForward <= 0) {
       addlog(LT_LIGHT, ambient); //DEBUG
@@ -513,10 +520,11 @@ void senseForPilot(struct PilotRequest *req) {
       req->turn = updateTraceState(ambient);
       if (req->turn != 0) {
         waitingForward = WAIT_FORWARD;
-        return;
+        return true;
       }
     }
   }
+  return hasReq;
 }
 
 void sendPilotRequest(const struct PilotRequest& req) {
@@ -558,7 +566,7 @@ void sendPilotRequest(const struct PilotRequest& req) {
   keep_forward = req.forward;
   keep_vertical_movement = req.vertical_movement;
 
-  if (keep_forward != 0 || keep_vertical_movement != 0) {
+  if (keep_forward != 0 || keep_vertical_movement != 0 || reqTurnMillis > 0 && millis() - reqTurnMillis >= reqTurnWait - PILOT_INTERVAL * 2) {
     mambo.fly(DRIFT_OFFSET, keep_forward, 0, keep_vertical_movement);
     addlog(LT_FLY, keep_forward * 100 + keep_vertical_movement);
     if (keep_forward != 0) {
@@ -572,10 +580,11 @@ void loop() {
   struct PilotRequest req = {
     keep_land, keep_forward, keep_vertical_movement, 0, pilotState
   };
+  bool hasReq = false;
 
   if (triggerSensorPolling == 1) {
     triggerSensorPolling = -1; // now sensing
-    senseForPilot(&req);
+    hasReq = senseForPilot(&req);
     triggerSensorPolling = 0;
 
     if (millis() - prevTemperatureMillis > 2000) {
@@ -602,7 +611,7 @@ void loop() {
       Serial.println();
       Serial.print(SENSING_INTERVAL); Serial.print(",");
       Serial.print(FORWARD_VALUE); Serial.print(",");
-      Serial.print(TURN_RIGHT_VALUE); Serial.println();
+      Serial.print(TURNWAIT_90); Serial.println();
       for (int i = 0; i < logcount; i++) {
         struct LOGITEM *p = &logdata[i];
         Serial.print(p->ds); Serial.print(",");

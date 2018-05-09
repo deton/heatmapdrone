@@ -259,10 +259,10 @@ void ParrotMambo::land() {
   lastWriteMillis = millis();
 }
 
-// @param roll: right/left [-100, 100]
-// @param pitch: forward/backward [-100, 100]
+// @param roll: left/right [-100, 100]
+// @param pitch: backward/forward [-100, 100]
 // @param yaw: turn [-100, 100]
-// @param vertical: up/down [-100, 100]
+// @param vertical: down/up [-100, 100]
 void ParrotMambo::fly(int8_t roll, int8_t pitch, int8_t yaw, int8_t vertical) {
   Serial.print("fly:");
   Serial.print(roll); Serial.print(",");
