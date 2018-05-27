@@ -17,19 +17,41 @@
  * @note This demo is Nordic HRM example.
  *       You could use nRF toolbox tool to test it.
  */
+#define SENSOR_VCNL4010 0
+#define SENSOR_TOF 1
+#define SENSOR_TEMPERATURE 1
+
 #include <nRF5x_BLE_API.h>
+#include <Wire.h>
+#if SENSOR_VCNL4010
 #include "Adafruit_VCNL4010.h"
+#endif
+#if SENSOR_TOF
 // https://github.com/pololu/vl53l0x-arduino
 #include <VL53L0X.h>
+#endif
+#if SENSOR_TEMPERATURE
 #include <FaBoTemperature_ADT7410.h>
+#endif
 
-const uint8_t XSHUT_PIN = D4;
-const uint8_t TOF_UP_NEWADDR = 42; // TOF_FRONT = 41 (default)
+const uint8_t PIN_LIGHT1 = A5;
+const uint8_t PIN_LIGHT2 = A4;
 
+#if SENSOR_TOF
+const uint8_t XSHUT_PIN = D6;
+const uint8_t TOF_FRONT_NEWADDR = 42; // TOF_UP = 41 (default)
+#endif
+
+#if SENSOR_VCNL4010
 Adafruit_VCNL4010 vcnl;
+#endif
+#if SENSOR_TOF
 VL53L0X tof_up;
 VL53L0X tof_front;
+#endif
+#if SENSOR_TEMPERATURE
 FaBoTemperature adt7410;
+#endif
 
 #define DEVICE_NAME       "Nordic_HRM"
 
@@ -73,13 +95,16 @@ void periodicCallback() {
 }
 
 void setup() {
+#if SENSOR_TOF
   // https://forum.pololu.com/t/vl53l0x-maximum-sensors-on-i2c-arduino-bus/10845/7
-  pinMode(XSHUT_PIN, OUTPUT); // LOW: shutdown tof_front
+  pinMode(XSHUT_PIN, OUTPUT); // LOW: shutdown tof_up
+#endif
 
   Serial.begin(9600);
   Serial.println("Nordic_HRM Demo ");
   Wire.begin();
 
+#if SENSOR_VCNL4010
   if (! vcnl.begin()){
     Serial.println("Sensor not found :(");
     while (1);
@@ -87,23 +112,26 @@ void setup() {
   // disable proximity sensing. use ambient sensing only
   vcnl.setLEDcurrent(0);
   vcnl.setFrequency(VCNL4010_1_95);
+#endif
 
+#if SENSOR_TOF
   // change address to use multiple VL53L0X
-  tof_up.setAddress(TOF_UP_NEWADDR);
-  pinMode(XSHUT_PIN, INPUT); // HIGH: boot tof_front. default addr
-  delay(10);
+  tof_front.setAddress(TOF_FRONT_NEWADDR);
+  pinMode(XSHUT_PIN, INPUT); // HIGH: boot tof_up. default addr
+  delay(50);
   tof_up.init();
   tof_up.setTimeout(300);
   tof_up.setMeasurementTimingBudget(20000);
   tof_front.init();
   tof_front.setTimeout(300);
   tof_front.setMeasurementTimingBudget(20000);
+#endif
 
+#if SENSOR_TEMPERATURE
   adt7410.begin();
+#endif
 
-  // Init timer task
   ticker_task1.attach(periodicCallback, 1);
-  // Init ble
   ble.init();
   ble.onDisconnection(disconnectionCallBack);
 
@@ -112,11 +140,8 @@ void setup() {
   ble.accumulateAdvertisingPayload(GapAdvertisingData::COMPLETE_LIST_16BIT_SERVICE_IDS, (uint8_t*)uuid16_list, sizeof(uuid16_list));
   ble.accumulateAdvertisingPayload(GapAdvertisingData::HEART_RATE_SENSOR_HEART_RATE_BELT);
   ble.accumulateAdvertisingPayload(GapAdvertisingData::COMPLETE_LOCAL_NAME, (uint8_t *)DEVICE_NAME, sizeof(DEVICE_NAME));
-  // set adv_type
   ble.setAdvertisingType(GapAdvertisingParams::ADV_CONNECTABLE_UNDIRECTED);
-    // add service
   ble.addService(hrmService);
-  // set device name
   ble.setDeviceName((const uint8_t *)DEVICE_NAME);
   // set tx power,valid values are -40, -20, -16, -12, -8, -4, 0, 4
   ble.setTxPower(4);
@@ -124,7 +149,6 @@ void setup() {
   ble.setAdvertisingInterval(160);
   // set adv_timeout, in seconds
   ble.setAdvertisingTimeout(0);
-  // start advertising
   ble.startAdvertising();
 }
 
@@ -133,16 +157,25 @@ void loop() {
 
   if (millis() - prevMillis > 1000) {
     prevMillis = millis();
-    uint16_t ambient = vcnl.readAmbient();
 
-    Serial.print("sensing ms: "); Serial.println(millis() - prevMillis); // ex. 117 ms
+    int light1 = analogRead(PIN_LIGHT1);
+    int light2 = analogRead(PIN_LIGHT2);
+    Serial.print("sensing ms: "); Serial.println(millis() - prevMillis); // ex. 11ms
+    Serial.print("Light1: "); Serial.println(light1);
+    Serial.print("Light2: "); Serial.println(light2);
+
+#if SENSOR_VCNL4010
+    uint16_t ambient = vcnl.readAmbient();
+    //Serial.print("sensing ms: "); Serial.println(millis() - prevMillis); // ex. 117 ms
 
     Serial.print("Ambient: "); Serial.println(ambient);
     //Serial.print("Proximity: "); Serial.println(vcnl.readProximity());
     // 75:65535 = hrm:ambient
-    //hrmCounter = ambient * 75.0 / 65535.0 + 100;
+    hrmCounter = ambient * 75.0 / 65535.0 + 100;
     //Serial.print("hrm value: "); Serial.println(hrmCounter);
+#endif
 
+#if SENSOR_TOF
     uint16_t mm_up = tof_up.readRangeSingleMillimeters();
     if (!tof_up.timeoutOccurred()) {
       Serial.print("up ToF mm: "); Serial.println(mm_up);
@@ -158,12 +191,15 @@ void loop() {
       }
       Serial.print("front ToF mm: "); Serial.println(mm_front);
     }
+#endif
 
+#if SENSOR_TEMPERATURE
     float temp = adt7410.readTemperature();
     Serial.print("temperature: "); Serial.println(temp, 1);
     // 75:255 = hrm:(temp+55) // temp:[-55, 150]
     hrmCounter = (temp + 55) * 75.0 / 255.0 + 100;
     Serial.print("hrm value: "); Serial.println(hrmCounter);
+#endif
   }
 }
 

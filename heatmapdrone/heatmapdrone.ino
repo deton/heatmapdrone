@@ -1,5 +1,4 @@
 #include <nRF5x_BLE_API.h>
-#include "Adafruit_VCNL4010.h"
 #include <VL53L0X.h> // https://github.com/pololu/vl53l0x-arduino
 #include <FaBoTemperature_ADT7410.h>
 #include "parrotmambo.h"
@@ -41,58 +40,47 @@ volatile uint8_t prevDarker = 0;
 volatile uint8_t prevLighter = 0;
 const uint8_t ONLIGHT_WAIT_COUNT = 2;
 
-const uint16_t AMBIENT_DARK_THRESHOLD = 2400; // XXX
-const uint16_t AMBIENT_LIGHT_THRESHOLD = 3900; // XXX
+const int AMBIENT_DARK_THRESHOLD = 95; // XXX
+const int AMBIENT_LIGHT_THRESHOLD = 105; // XXX
 
-// substate for tracing ceiling light on PS_EAST/WEST state
-enum TRACE_STATE {
-  TS_RIGHT, TS_LEFT, TS_ONLIGHT
-};
-volatile enum TRACE_STATE traceState = TS_ONLIGHT;
-volatile enum TRACE_STATE recentReqTraceState = TS_ONLIGHT;
-volatile int16_t waitingForward = 0; // waiting fly forward? (after left/right)
-const int16_t WAIT_FORWARD = 300; // [ms]
-
-const uint16_t PILOT_INTERVAL = 40; // [ms]
-const uint16_t FORWARD_VALUE = 13; // [-100,100]
+const uint16_t PILOT_INTERVAL = 100; // [ms]
+const uint16_t FORWARD_VALUE = 14; // [-100,100]
 const uint16_t UP_VALUE = 40; // [-100,100]
-const uint16_t TURN_RIGHT_VALUE = 20; // [degree]
-const int8_t DRIFT_OFFSET = 0; // offset to fix drift on forward [-100,100]
+const uint16_t RIGHT_VALUE = 13; // [-100,100]
 const uint32_t TURNWAIT_90 = 600; // [ms]
-const uint32_t TURNWAIT_RIGHT = TURNWAIT_90 * TURN_RIGHT_VALUE / 90; // [ms]
 
 struct PilotRequest {
   bool land;
   int8_t forward;
   int8_t vertical_movement;
+  int8_t right;
   int16_t turn;
   enum PILOT_STATE pilotState;
 };
 
 volatile bool keep_land = false;
 volatile int8_t keep_forward = 0; // continue sending fly forward
+volatile int8_t keep_right = 0;
 volatile int8_t keep_vertical_movement = 0;
 
 volatile uint8_t prevNearWall = 0;
 volatile uint32_t reqTurnMillis = 0; // turn start time [ms]
-volatile uint32_t reqTurnWait = TURNWAIT_90; // [ms]
 
 /// sensors
-// XXX: sensing takes 164ms.  If interval is 200, no additional pilot (forward)
-//      request is sent and drift increase
 const uint16_t SENSING_INTERVAL = 300; // [ms]
 
 const uint16_t FRONT_MIN = 2000; // 2m from wall (VL53L0X max sensing 2m)
 const uint16_t UP_MIN = 300; // 30cm from ceiling
 const uint16_t UP_MAX = 1000; // 1m from ceiling
 
-const uint8_t XSHUT_PIN = D4;
-const uint8_t TOF_UP_NEWADDR = 42; // TOF_FRONT = 41 (default)
+const uint8_t PIN_LIGHTL = A5; // left
+const uint8_t PIN_LIGHTR = A4; // right
+const uint8_t PIN_XSHUT = D6;
+const uint8_t TOF_FRONT_NEWADDR = 42; // TOF_UP = 41 (default)
 
 static volatile int8_t triggerSensorPolling = 0;
 static volatile int8_t triggerPilotPolling = 0;
 
-Adafruit_VCNL4010 vcnl;
 VL53L0X tof_up;
 VL53L0X tof_front;
 FaBoTemperature adt7410;
@@ -106,9 +94,10 @@ struct LOGITEM {
 // len 5400: error "region RAM overflowed with stack"
 static uint16_t logcount = 0;
 const uint8_t LT_TEMPERATURE = 0;
-const uint8_t LT_LIGHT = 1;
-const uint8_t LT_FRONT = 2;
-const uint8_t LT_UP = 3;
+const uint8_t LT_FRONT = 1;
+const uint8_t LT_UP = 2;
+const uint8_t LT_LIGHTL = 3; // left
+const uint8_t LT_LIGHTR = 4; // right
 const uint8_t LT_TAKEOFF = 10;
 const uint8_t LT_LAND = 11;
 const uint8_t LT_TURN = 12;
@@ -119,6 +108,13 @@ void addlog(uint8_t type, int16_t value) {
   logdata[logcount].type = type;
   logdata[logcount].value = value;
   ++logcount;
+}
+void addflylog(int8_t forward, int8_t right, int8_t vertical) {
+  uint16_t value = 0;
+  value += (forward  > 0) ? 100 : (forward  < 0) ? 200 : 0;
+  value += (right    > 0) ?  10 : (right    < 0) ?  20 : 0;
+  value += (vertical > 0) ?   1 : (vertical < 0) ?   2 : 0;
+  addlog(LT_FLY, value);
 }
 
 BLE ble;
@@ -240,49 +236,22 @@ void periodicPilotCallback() {
   }
 }
 
-void vcnl4010_setAmbientContinuousMode(bool enable) {
-  // XXX: Adafruit_VCNL4010.h has no API to set ambient parameter
-  uint8_t data = 0;
-  if (enable) {
-    data |= 1 << 7; // continuous conversion mode for faster measurements
-  }
-  data |= 1 << 4; // ambient light measurement rate. default: 2 samples/s
-  data |= 1 << 3; // auto offset compensation. default: enable
-  data |= 5; // averaging function (number of measurements per run). default: 32conv.
-
-  Wire.beginTransmission(VCNL4010_I2CADDR_DEFAULT);
-  Wire.write(VCNL4010_AMBIENTPARAMETER);
-  Wire.write(data);
-  Wire.endTransmission();
-}
-
 void setupSensors() {
   // https://forum.pololu.com/t/vl53l0x-maximum-sensors-on-i2c-arduino-bus/10845/7
-  pinMode(XSHUT_PIN, OUTPUT); // LOW: shutdown tof_front
+  pinMode(PIN_XSHUT, OUTPUT); // LOW: shutdown tof_up
 
   Wire.begin();
 
-  if (! vcnl.begin()){
-    Serial.println("VCNL4010 Sensor not found :(");
-    while (1);
-  }
-  // disable proximity sensing. use ambient sensing only
-  vcnl.setLEDcurrent(0);
-  vcnl.setFrequency(VCNL4010_1_95);
-  // set VCNL4010 to continuous mode for short time sensing
-  // (default mode takes 117ms, continous mode takes 36ms)
-  vcnl4010_setAmbientContinuousMode(true);
-
   // change address to use multiple VL53L0X
-  tof_up.setAddress(TOF_UP_NEWADDR);
-  pinMode(XSHUT_PIN, INPUT); // HIGH: boot tof_front. default addr
-  delay(10);
-  tof_up.init();
-  tof_up.setTimeout(300);
-  tof_up.setMeasurementTimingBudget(20000);
+  tof_front.setAddress(TOF_FRONT_NEWADDR);
+  pinMode(PIN_XSHUT, INPUT); // HIGH: boot tof_up. default addr
+  delay(50);
   tof_front.init();
   tof_front.setTimeout(300);
   tof_front.setMeasurementTimingBudget(20000);
+  tof_up.init();
+  tof_up.setTimeout(300);
+  tof_up.setMeasurementTimingBudget(20000);
 
   adt7410.begin();
 }
@@ -309,15 +278,15 @@ void setup() {
   mambo.onReady(onReadyCallBack);
 }
 
-bool isDarker(uint16_t ambient) {
+bool isDarker(int ambient) {
   return (ambient < AMBIENT_DARK_THRESHOLD);
 }
 
-bool isLighter(uint16_t ambient) {
+bool isLighter(int ambient) {
   return (ambient >= AMBIENT_LIGHT_THRESHOLD);
 }
 
-enum FINDLIGHT_STATE getNewFindlightState(enum FINDLIGHT_STATE currentState, uint16_t ambient) {
+enum FINDLIGHT_STATE getNewFindlightState(enum FINDLIGHT_STATE currentState, int ambient) {
   switch (findlightState) {
     case FS_LEAVING_LIGHT:
     case FS_ONLIGHT:
@@ -355,61 +324,6 @@ enum FINDLIGHT_STATE getNewFindlightState(enum FINDLIGHT_STATE currentState, uin
       return FS_ONLIGHT;
   }
   return currentState;
-}
-
-enum TRACE_STATE getNewTraceState(enum TRACE_STATE currentState, uint16_t ambient) {
-  switch (currentState) {
-    case TS_ONLIGHT:
-      if (!isDarker(ambient)) {
-        prevDarker = 0;
-        return currentState;
-      }
-      if (prevDarker == 0) {
-        Serial.print("++prevDarker ");
-        ++prevDarker;
-        return currentState;
-      }
-      // if darker ambient sensor value continues
-      prevDarker = 0;
-      return (recentReqTraceState == TS_LEFT) ? TS_RIGHT : TS_LEFT;
-    case TS_LEFT:
-    case TS_RIGHT:
-      if (!isDarker(ambient)) {
-        prevDarker = 0;
-        if (prevLighter == 0) {
-          ++prevLighter;
-          return currentState;
-        }
-        prevLighter = 0;
-        return TS_ONLIGHT;
-      }
-      prevLighter = 0;
-      if (prevDarker == 0) {
-        ++prevDarker;
-        return currentState;
-      }
-      prevDarker = 0;
-      return (currentState == TS_LEFT) ? TS_RIGHT : TS_LEFT;
-  }
-  return currentState;
-}
-
-int16_t updateTraceState(uint16_t ambient) {
-  enum TRACE_STATE prev = traceState;
-  traceState = getNewTraceState(traceState, ambient);
-  if (prev == traceState) {
-    return 0;
-  }
-  if (traceState == TS_RIGHT) {
-    Serial.print("right ");
-    recentReqTraceState = traceState;
-    return TURN_RIGHT_VALUE;
-  } else if (traceState == TS_LEFT) {
-    Serial.print("left ");
-    recentReqTraceState = traceState;
-    return -TURN_RIGHT_VALUE;
-  }
-  return 0;
 }
 
 int8_t senseForVerticalMovement() {
@@ -459,6 +373,7 @@ bool senseFront(struct PilotRequest *req) {
     //  req->forward = -FORWARD_VALUE; // backward
     //} else {
       req->forward = 0; // stop forward
+      req->right = 0;
     //}
     return true;
   }
@@ -469,12 +384,14 @@ bool senseFront(struct PilotRequest *req) {
       Serial.print("w2e ");
       req->turn = 90;
       req->forward = 0;
+      req->right = 0;
       req->pilotState = PS_W2E;
       break;
     case PS_EAST:
       Serial.print("e2w ");
       req->turn = -90;
       req->forward = 0;
+      req->right = 0;
       req->pilotState = PS_E2W;
       break;
     case PS_W2E:
@@ -487,10 +404,26 @@ bool senseFront(struct PilotRequest *req) {
   return true;
 }
 
+// decide left/right movement from left/right light sensor ADC values.
+// trace light like line tracer.
+int8_t decideLeftRightMovement(int left, int right) {
+  int diff = right - left;
+  if (abs(diff) < right / 10) {
+    return 0;
+  }
+  if (right > left) { // right is lighter
+    return RIGHT_VALUE; // move right
+  }
+  if (right < left) { // left is lighter
+    return -RIGHT_VALUE; // move left
+  }
+  return 0;
+}
+
 bool senseForPilot(struct PilotRequest *req) {
   req->pilotState = pilotState;
 
-  if (reqTurnMillis > 0 && millis() - reqTurnMillis < reqTurnWait) {
+  if (reqTurnMillis > 0 && millis() - reqTurnMillis < TURNWAIT_90) {
     return false;
   }
   reqTurnMillis = 0;
@@ -498,15 +431,17 @@ bool senseForPilot(struct PilotRequest *req) {
   req->vertical_movement = senseForVerticalMovement();
   bool hasReq = senseFront(req);
 
-  uint16_t ambient = vcnl.readAmbient();
-  //Serial.print("sensing ms: "); Serial.println(millis() - st); // ex.164ms (readAmbient: 117ms, tof: 23ms)
-
-  Serial.print("ambient="); Serial.println(ambient);
+  int lightl = analogRead(PIN_LIGHTL);
+  int lightr = analogRead(PIN_LIGHTR);
+  Serial.print("lightl=");   Serial.print(lightl);
+  Serial.print(", lightr="); Serial.println(lightr);
   if (mambo.isFlying()) {
     // PS_W2E/E2W: if find light line, turn_degrees(90/-90)
     // XXX: rewrite to use state machine and sensor events
     if (pilotState == PS_W2E || pilotState == PS_E2W) {
-      addlog(LT_LIGHT, ambient); //DEBUG
+      int ambient = max(lightl, lightr);
+      addlog(LT_LIGHTL, lightl); //DEBUG
+      addlog(LT_LIGHTR, lightr); //DEBUG
       enum FINDLIGHT_STATE prev = findlightState;
       findlightState = getNewFindlightState(findlightState, ambient);
       if (findlightState == FS_ONLIGHT_WAIT) {
@@ -525,16 +460,14 @@ bool senseForPilot(struct PilotRequest *req) {
         }
         return true;
       }
-#if 0
-    } else if (req->turn == 0 && (pilotState == PS_WEST || pilotState == PS_EAST) && waitingForward <= 0) {
-      addlog(LT_LIGHT, ambient); //DEBUG
+    } else if (req->turn == 0 && (pilotState == PS_WEST || pilotState == PS_EAST)) {
+      addlog(LT_LIGHTL, lightl); //DEBUG
+      addlog(LT_LIGHTR, lightr); //DEBUG
       // PS_WEST/EAST: trace light line
-      req->turn = updateTraceState(ambient);
-      if (req->turn != 0) {
-        waitingForward = WAIT_FORWARD;
+      req->right = decideLeftRightMovement(lightl, lightr);
+      if (req->right != 0) {
         return true;
       }
-#endif
     }
   }
   return hasReq;
@@ -553,6 +486,7 @@ void sendPilotRequest(const struct PilotRequest& req) {
 
   if (req.turn != 0) {
     keep_forward = 0;
+    keep_right = 0;
     keep_vertical_movement = 0;
     mambo.turn_degrees(req.turn);
     addlog(LT_TURN, req.turn);
@@ -562,42 +496,33 @@ void sendPilotRequest(const struct PilotRequest& req) {
         prevNearWall = 0;
         prevDarker = 0;
         prevLighter = 0;
-        reqTurnWait = TURNWAIT_90;
         if (pilotState == PS_W2E || pilotState == PS_E2W) {
           Serial.println("leaving_light ");
           findlightState = FS_LEAVING_LIGHT;
-        } else { // PS_EAST/WEST
-          // reset trace state and related vars
-          traceState = TS_ONLIGHT;
-          recentReqTraceState = (pilotState == PS_EAST) ? TS_RIGHT : TS_LEFT;
         }
-    } else { // turn right/left
-        reqTurnWait = TURNWAIT_RIGHT;
     }
     return;
   }
   keep_forward = req.forward;
+  keep_right = req.right;
   keep_vertical_movement = req.vertical_movement;
 
-  if (keep_forward != 0 || keep_vertical_movement != 0 || reqTurnMillis > 0 && millis() - reqTurnMillis >= reqTurnWait - PILOT_INTERVAL * 2) {
-    mambo.fly(DRIFT_OFFSET, keep_forward, 0, keep_vertical_movement);
-    addlog(LT_FLY, keep_forward * 100 + keep_vertical_movement);
-    if (keep_forward != 0) {
-      waitingForward -= PILOT_INTERVAL;
-    }
+  if (keep_forward != 0 || keep_right != 0 || keep_vertical_movement != 0
+      || (reqTurnMillis > 0 && millis() - reqTurnMillis >= TURNWAIT_90 - PILOT_INTERVAL * 2)) {
+    mambo.fly(keep_right, keep_forward, 0, keep_vertical_movement);
+    addflylog(keep_forward, keep_right, keep_vertical_movement);
   }
 }
 
 void loop() {
   static uint32_t prevTemperatureMillis = 0;
   struct PilotRequest req = {
-    keep_land, keep_forward, keep_vertical_movement, 0, pilotState
+    keep_land, keep_forward, keep_vertical_movement, keep_right, 0, pilotState
   };
-  bool hasReq = false;
 
   if (triggerSensorPolling == 1) {
     triggerSensorPolling = -1; // now sensing
-    hasReq = senseForPilot(&req);
+    senseForPilot(&req);
     triggerSensorPolling = 0;
 
     if (millis() - prevTemperatureMillis > 2000) {
@@ -623,7 +548,9 @@ void loop() {
     if (ch == 'r') { // output logdata
       Serial.println();
       Serial.print(SENSING_INTERVAL); Serial.print(",");
+      Serial.print(PILOT_INTERVAL); Serial.print(",");
       Serial.print(FORWARD_VALUE); Serial.print(",");
+      Serial.print(RIGHT_VALUE); Serial.print(",");
       Serial.print(TURNWAIT_90); Serial.println();
       for (int i = 0; i < logcount; i++) {
         struct LOGITEM *p = &logdata[i];
