@@ -37,17 +37,17 @@ enum FINDLIGHT_STATE {
 };
 volatile enum FINDLIGHT_STATE findlightState = FS_ONLIGHT;
 volatile uint8_t prevDarker = 0;
-volatile uint8_t prevLighter = 0;
-const uint8_t ONLIGHT_WAIT_COUNT = 2;
 
-const int AMBIENT_DARK_THRESHOLD = 95; // XXX
-const int AMBIENT_LIGHT_THRESHOLD = 105; // XXX
+const int AMBIENT_DARK_THRESHOLD = 115; // XXX
+const int AMBIENT_LIGHT_THRESHOLD = 200; // XXX
 
-const uint16_t PILOT_INTERVAL = 100; // [ms]
-const uint16_t FORWARD_VALUE = 14; // [-100,100]
+const uint16_t PILOT_INTERVAL = 0; // 0: pilot on SENSING_INTERVAL [ms]
+const uint16_t FORWARD_VALUE = 100; // [-100,100]
 const uint16_t UP_VALUE = 40; // [-100,100]
-const uint16_t RIGHT_VALUE = 13; // [-100,100]
-const uint32_t TURNWAIT_90 = 600; // [ms]
+const uint16_t RIGHT_VALUE = 100; // [-100,100]
+const uint32_t NEARWALL_WAIT = 1500; // wait before turn to reduce drift [ms]
+const uint32_t TURN_WAIT = 800; // wait turn completion [ms]
+const uint32_t ONLIGHT_WAIT = 1500; // wait before turn [ms]
 
 struct PilotRequest {
   bool land;
@@ -63,18 +63,19 @@ volatile int8_t keep_forward = 0; // continue sending fly forward
 volatile int8_t keep_right = 0;
 volatile int8_t keep_vertical_movement = 0;
 
-volatile uint8_t prevNearWall = 0;
+volatile uint32_t nearWallMillis = 0; // [ms]
 volatile uint32_t reqTurnMillis = 0; // turn start time [ms]
+volatile uint32_t onlightMillis = 0; // [ms]
 
 /// sensors
-const uint16_t SENSING_INTERVAL = 300; // [ms]
+const uint16_t SENSING_INTERVAL = 1000; // [ms]
 
 const uint16_t FRONT_MIN = 2000; // 2m from wall (VL53L0X max sensing 2m)
 const uint16_t UP_MIN = 300; // 30cm from ceiling
-const uint16_t UP_MAX = 1000; // 1m from ceiling
+const uint16_t UP_MAX = 800; // 80cm from ceiling
 
-const uint8_t PIN_LIGHTL = A5; // left
-const uint8_t PIN_LIGHTR = A4; // right
+const uint8_t PIN_LIGHTL = A5; // left light sensor NJL7502L
+const uint8_t PIN_LIGHTR = A4; // right light sensor NJL7502L
 const uint8_t PIN_XSHUT = D6;
 const uint8_t TOF_FRONT_NEWADDR = 42; // TOF_UP = 41 (default)
 
@@ -261,7 +262,9 @@ void setup() {
   setupSensors();
 
   sensingTicker.attach_us(periodicSensingCallback, SENSING_INTERVAL * 1000);
-  pilotTicker.attach_us(periodicPilotCallback, PILOT_INTERVAL * 1000);
+  if (PILOT_INTERVAL != 0) {
+    pilotTicker.attach_us(periodicPilotCallback, PILOT_INTERVAL * 1000);
+  }
   ble.init();
   ble.onConnection(connectionCallBack);
   ble.onDisconnection(disconnectionCallBack);
@@ -305,22 +308,22 @@ enum FINDLIGHT_STATE getNewFindlightState(enum FINDLIGHT_STATE currentState, int
       return FS_APPROACHING_LIGHT;
     case FS_APPROACHING_LIGHT:
       if (!isLighter(ambient)) {
-        prevLighter = 0;
+        onlightMillis = 0;
         return currentState;
       }
-      if (prevLighter == 0) {
-        Serial.print("++prevLighter ");
-        ++prevLighter;
+      if (onlightMillis == 0) {
+        Serial.print("onlight0 ");
+        onlightMillis = millis();
         return currentState;
       }
       Serial.print("onlightwait ");
       return FS_ONLIGHT_WAIT;
     case FS_ONLIGHT_WAIT:
-      if (++prevLighter < ONLIGHT_WAIT_COUNT) {
+      if (millis() - onlightMillis < ONLIGHT_WAIT) {
         return currentState;
       }
       Serial.print("onlight ");
-      prevLighter = 0;
+      onlightMillis = 0;
       return FS_ONLIGHT;
   }
   return currentState;
@@ -359,26 +362,26 @@ bool senseFront(struct PilotRequest *req) {
   //Serial.print("front ToF mm: "); Serial.println(mm_front); // from wall
   if (mm_front > FRONT_MIN) {
     Serial.print("forward ");
-    prevNearWall = 0;
+    nearWallMillis = 0;
     req->forward = FORWARD_VALUE;
     return true;
   }
-  addlog(LT_FRONT, mm_front); //DEBUG
 
   // too near from wall
-  if (prevNearWall < 5) {
-    Serial.print("++prevNearWall ");
-    ++prevNearWall;
-    //if (prevNearWall >= 3) {
-    //  req->forward = -FORWARD_VALUE; // backward
-    //} else {
-      req->forward = 0; // stop forward
-      req->right = 0;
-    //}
+  addlog(LT_FRONT, mm_front); //DEBUG
+  if (nearWallMillis == 0) {
+    nearWallMillis = millis();
+    Serial.print("nearWall ");
+    req->forward = 0; // stop forward
+    req->right = 0; // avoid forward by right != 0
+    return true;
+  }
+  if (millis() - nearWallMillis < NEARWALL_WAIT) {
     return true;
   }
 
   // if near wall sensor value continues
+  nearWallMillis = 0;
   switch (pilotState) {
     case PS_WEST:
       Serial.print("w2e ");
@@ -423,13 +426,13 @@ int8_t decideLeftRightMovement(int left, int right) {
 bool senseForPilot(struct PilotRequest *req) {
   req->pilotState = pilotState;
 
-  if (reqTurnMillis > 0 && millis() - reqTurnMillis < TURNWAIT_90) {
+  if (reqTurnMillis > 0 && millis() - reqTurnMillis < TURN_WAIT) {
     return false;
   }
   reqTurnMillis = 0;
 
   req->vertical_movement = senseForVerticalMovement();
-  bool hasReq = senseFront(req);
+  bool hasReq = senseFront(req); // forward or turn
 
   int lightl = analogRead(PIN_LIGHTL);
   int lightr = analogRead(PIN_LIGHTR);
@@ -446,6 +449,7 @@ bool senseForPilot(struct PilotRequest *req) {
       findlightState = getNewFindlightState(findlightState, ambient);
       if (findlightState == FS_ONLIGHT_WAIT) {
         req->forward = 0; // stop forward. hover a while to reduce drift after turn
+        req->right = 0;
         return true;
       }
       if (prev == FS_ONLIGHT_WAIT && findlightState == FS_ONLIGHT) {
@@ -460,7 +464,8 @@ bool senseForPilot(struct PilotRequest *req) {
         }
         return true;
       }
-    } else if (req->turn == 0 && (pilotState == PS_WEST || pilotState == PS_EAST)) {
+    } else if (req->turn == 0 && req->forward != 0
+        && (pilotState == PS_WEST || pilotState == PS_EAST)) {
       addlog(LT_LIGHTL, lightl); //DEBUG
       addlog(LT_LIGHTR, lightr); //DEBUG
       // PS_WEST/EAST: trace light line
@@ -493,9 +498,9 @@ void sendPilotRequest(const struct PilotRequest& req) {
     reqTurnMillis = millis();
     if (pilotState != req.pilotState) { // turn 90/-90 degrees
         pilotState = req.pilotState;
-        prevNearWall = 0;
+        nearWallMillis = 0;
         prevDarker = 0;
-        prevLighter = 0;
+        onlightMillis = 0;
         if (pilotState == PS_W2E || pilotState == PS_E2W) {
           Serial.println("leaving_light ");
           findlightState = FS_LEAVING_LIGHT;
@@ -507,8 +512,7 @@ void sendPilotRequest(const struct PilotRequest& req) {
   keep_right = req.right;
   keep_vertical_movement = req.vertical_movement;
 
-  if (keep_forward != 0 || keep_right != 0 || keep_vertical_movement != 0
-      || (reqTurnMillis > 0 && millis() - reqTurnMillis >= TURNWAIT_90 - PILOT_INTERVAL * 2)) {
+  if (keep_forward != 0 || keep_right != 0 || keep_vertical_movement != 0) {
     mambo.fly(keep_right, keep_forward, 0, keep_vertical_movement);
     addflylog(keep_forward, keep_right, keep_vertical_movement);
   }
@@ -531,6 +535,10 @@ void loop() {
       addlog(LT_TEMPERATURE, temp * 100);
       //Serial.print("temperature: "); Serial.println(temp, 1);
     }
+
+    if (PILOT_INTERVAL == 0) { // send pilot command on sensing
+      triggerPilotPolling = 1;
+    }
   }
 
   if (triggerPilotPolling == 1) {
@@ -551,7 +559,7 @@ void loop() {
       Serial.print(PILOT_INTERVAL); Serial.print(",");
       Serial.print(FORWARD_VALUE); Serial.print(",");
       Serial.print(RIGHT_VALUE); Serial.print(",");
-      Serial.print(TURNWAIT_90); Serial.println();
+      Serial.print(TURN_WAIT); Serial.println();
       for (int i = 0; i < logcount; i++) {
         struct LOGITEM *p = &logdata[i];
         Serial.print(p->ds); Serial.print(",");
