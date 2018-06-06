@@ -42,12 +42,14 @@ const int AMBIENT_DARK_THRESHOLD = 115; // XXX
 const int AMBIENT_LIGHT_THRESHOLD = 200; // XXX
 
 const uint16_t PILOT_INTERVAL = 0; // 0: pilot on SENSING_INTERVAL [ms]
-const uint16_t FORWARD_VALUE = 100; // [-100,100]
-const uint16_t UP_VALUE = 40; // [-100,100]
-const uint16_t RIGHT_VALUE = 100; // [-100,100]
+const int8_t FORWARD_VALUE = 25; // [-100,100]
+const int8_t UP_VALUE = 40; // [-100,100]
+const int8_t RIGHT_VALUE = 40; // [-100,100]
+const int8_t RIGHT_OFFSET = 0; // offset to fix drift on forward
 const uint32_t NEARWALL_WAIT = 1500; // wait before turn to reduce drift [ms]
 const uint32_t TURN_WAIT = 800; // wait turn completion [ms]
 const uint32_t ONLIGHT_WAIT = 1500; // wait before turn [ms]
+const uint32_t CHANGEFLY_WAIT = 600; // wait before changing right/left to avoid no effect [ms]
 
 struct PilotRequest {
   bool land;
@@ -66,9 +68,10 @@ volatile int8_t keep_vertical_movement = 0;
 volatile uint32_t nearWallMillis = 0; // [ms]
 volatile uint32_t reqTurnMillis = 0; // turn start time [ms]
 volatile uint32_t onlightMillis = 0; // [ms]
+volatile uint32_t changeFlyWaitMillis = 0; // wait before changing right/left [ms]
 
 /// sensors
-const uint16_t SENSING_INTERVAL = 1000; // [ms]
+const uint16_t SENSING_INTERVAL = 400; // [ms]
 
 const uint16_t FRONT_MIN = 2000; // 2m from wall (VL53L0X max sensing 2m)
 const uint16_t UP_MIN = 300; // 30cm from ceiling
@@ -410,6 +413,9 @@ bool senseFront(struct PilotRequest *req) {
 // decide left/right movement from left/right light sensor ADC values.
 // trace light like line tracer.
 int8_t decideLeftRightMovement(int left, int right) {
+  if (max(left, right) < 30) { // absolute values are too dark
+    return 0;
+  }
   int diff = right - left;
   if (abs(diff) < right / 10) {
     return 0;
@@ -478,8 +484,8 @@ bool senseForPilot(struct PilotRequest *req) {
   return hasReq;
 }
 
-void sendPilotRequest(const struct PilotRequest& req) {
-  if (req.land) {
+void sendPilotRequest(struct PilotRequest *req) {
+  if (req->land) {
     keep_land = true;
   }
   if (keep_land) { // land is high priority
@@ -489,15 +495,15 @@ void sendPilotRequest(const struct PilotRequest& req) {
     return;
   }
 
-  if (req.turn != 0) {
+  if (req->turn != 0) {
     keep_forward = 0;
     keep_right = 0;
     keep_vertical_movement = 0;
-    mambo.turn_degrees(req.turn);
-    addlog(LT_TURN, req.turn);
+    mambo.turn_degrees(req->turn);
+    addlog(LT_TURN, req->turn);
     reqTurnMillis = millis();
-    if (pilotState != req.pilotState) { // turn 90/-90 degrees
-        pilotState = req.pilotState;
+    if (pilotState != req->pilotState) { // turn 90/-90 degrees
+        pilotState = req->pilotState;
         nearWallMillis = 0;
         prevDarker = 0;
         onlightMillis = 0;
@@ -508,12 +514,26 @@ void sendPilotRequest(const struct PilotRequest& req) {
     }
     return;
   }
-  keep_forward = req.forward;
-  keep_right = req.right;
-  keep_vertical_movement = req.vertical_movement;
+
+  if (changeFlyWaitMillis > 0) {
+    if (millis() - changeFlyWaitMillis < CHANGEFLY_WAIT) {
+      return;
+    }
+    changeFlyWaitMillis = 0;
+  } else {
+    if (req->right != 0 && req->right != keep_right) {
+      changeFlyWaitMillis = millis();
+      req->forward = 0; // stop forward
+      req->right = 0; // avoid forward by right value
+    }
+  }
+
+  keep_forward = req->forward;
+  keep_right = req->right;
+  keep_vertical_movement = req->vertical_movement;
 
   if (keep_forward != 0 || keep_right != 0 || keep_vertical_movement != 0) {
-    mambo.fly(keep_right, keep_forward, 0, keep_vertical_movement);
+    mambo.fly(keep_right + RIGHT_OFFSET, keep_forward, 0, keep_vertical_movement);
     addflylog(keep_forward, keep_right, keep_vertical_movement);
   }
 }
@@ -544,7 +564,7 @@ void loop() {
   if (triggerPilotPolling == 1) {
     if (mambo.isFlying()) {
       triggerPilotPolling = -1;
-      sendPilotRequest(req);
+      sendPilotRequest(&req);
     }
     triggerPilotPolling = 0;
     mambo.checkPing();
