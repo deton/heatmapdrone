@@ -42,14 +42,14 @@ const int AMBIENT_DARK_THRESHOLD = 115; // XXX
 const int AMBIENT_LIGHT_THRESHOLD = 200; // XXX
 
 const uint16_t PILOT_INTERVAL = 0; // 0: pilot on SENSING_INTERVAL [ms]
-const int8_t FORWARD_VALUE = 25; // [-100,100]
+const int8_t FORWARD_VALUE = 16; // [-100,100]
 const int8_t UP_VALUE = 40; // [-100,100]
-const int8_t RIGHT_VALUE = 40; // [-100,100]
+const int8_t RIGHT_VALUE = 27; // [-100,100]
 const int8_t RIGHT_OFFSET = 0; // offset to fix drift on forward
 const uint32_t NEARWALL_WAIT = 1500; // wait before turn to reduce drift [ms]
 const uint32_t TURN_WAIT = 800; // wait turn completion [ms]
 const uint32_t ONLIGHT_WAIT = 1500; // wait before turn [ms]
-const uint32_t CHANGEFLY_WAIT = 600; // wait before changing right/left to avoid no effect [ms]
+const uint32_t CHANGEFLY_WAIT = 1200; // wait before changing right/left to avoid no effect [ms]
 
 struct PilotRequest {
   bool land;
@@ -71,7 +71,7 @@ volatile uint32_t onlightMillis = 0; // [ms]
 volatile uint32_t changeFlyWaitMillis = 0; // wait before changing right/left [ms]
 
 /// sensors
-const uint16_t SENSING_INTERVAL = 400; // [ms]
+const uint16_t SENSING_INTERVAL = 200; // [ms]
 
 const uint16_t FRONT_MIN = 2000; // 2m from wall (VL53L0X max sensing 2m)
 const uint16_t UP_MIN = 300; // 30cm from ceiling
