@@ -41,15 +41,14 @@ volatile uint8_t prevDarker = 0;
 const int AMBIENT_DARK_THRESHOLD = 115; // XXX
 const int AMBIENT_LIGHT_THRESHOLD = 200; // XXX
 
-const uint16_t PILOT_INTERVAL = 0; // 0: pilot on SENSING_INTERVAL [ms]
-const int8_t FORWARD_VALUE = 16; // [-100,100]
+const uint16_t PILOT_INTERVAL = 400; // 0: pilot on SENSING_INTERVAL [ms]
+const int8_t FORWARD_VALUE = 30; // [-100,100]
 const int8_t UP_VALUE = 40; // [-100,100]
-const int8_t RIGHT_VALUE = 27; // [-100,100]
-const int8_t RIGHT_OFFSET = 0; // offset to fix drift on forward
+const int8_t RIGHT_VALUE = 40; // [-100,100]
 const uint32_t NEARWALL_WAIT = 1500; // wait before turn to reduce drift [ms]
 const uint32_t TURN_WAIT = 800; // wait turn completion [ms]
 const uint32_t ONLIGHT_WAIT = 1500; // wait before turn [ms]
-const uint32_t CHANGEFLY_WAIT = 1200; // wait before changing right/left to avoid no effect [ms]
+const uint32_t CHANGEFLY_WAIT = 1000; // wait before changing right/left to avoid no effect [ms]
 
 struct PilotRequest {
   bool land;
@@ -58,6 +57,7 @@ struct PilotRequest {
   int8_t right;
   int16_t turn;
   enum PILOT_STATE pilotState;
+  bool force;
 };
 
 volatile bool keep_land = false;
@@ -484,6 +484,28 @@ bool senseForPilot(struct PilotRequest *req) {
   return hasReq;
 }
 
+bool needPilotRequest(struct PilotRequest *req) {
+  if (!keep_land && req->land) {
+    return true;
+  }
+  if (req->turn != 0) {
+    return true;
+  }
+  if (changeFlyWaitMillis > 0) {
+    if (millis() - changeFlyWaitMillis < CHANGEFLY_WAIT) {
+      return false;
+    }
+    return true;
+  }
+  if (req->right != keep_right
+      || req->forward != keep_forward
+      || req->vertical_movement != keep_vertical_movement) {
+    req->force = true;
+    return true;
+  }
+  return false;
+}
+
 void sendPilotRequest(struct PilotRequest *req) {
   if (req->land) {
     keep_land = true;
@@ -532,8 +554,8 @@ void sendPilotRequest(struct PilotRequest *req) {
   keep_right = req->right;
   keep_vertical_movement = req->vertical_movement;
 
-  if (keep_forward != 0 || keep_right != 0 || keep_vertical_movement != 0) {
-    mambo.fly(keep_right + RIGHT_OFFSET, keep_forward, 0, keep_vertical_movement);
+  if (req->force || keep_forward != 0 || keep_right != 0 || keep_vertical_movement != 0) {
+    mambo.fly(keep_right, keep_forward, 0, keep_vertical_movement);
     addflylog(keep_forward, keep_right, keep_vertical_movement);
   }
 }
@@ -541,7 +563,7 @@ void sendPilotRequest(struct PilotRequest *req) {
 void loop() {
   static uint32_t prevTemperatureMillis = 0;
   struct PilotRequest req = {
-    keep_land, keep_forward, keep_vertical_movement, keep_right, 0, pilotState
+    keep_land, keep_forward, keep_vertical_movement, keep_right, 0, pilotState, false
   };
 
   if (triggerSensorPolling == 1) {
@@ -556,7 +578,9 @@ void loop() {
       //Serial.print("temperature: "); Serial.println(temp, 1);
     }
 
-    if (PILOT_INTERVAL == 0) { // send pilot command on sensing
+    // send pilot command on sensing
+    // || need to interrupt current keeping pilot request
+    if (PILOT_INTERVAL == 0 || needPilotRequest(&req)) {
       triggerPilotPolling = 1;
     }
   }
