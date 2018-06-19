@@ -18,7 +18,7 @@
   SDKもあるし、node.jsやpythonから使う例もあるので。
 * [BLE Nano V2](https://www.switch-science.com/catalog/3445/)
 * [VL53L0X](https://www.switch-science.com/catalog/2894/) 2個。前方の壁と天井からの距離測定用(I2C)
-* [ADT7410](http://akizukidenshi.com/catalog/g/gM-06675/)。温度センサ(I2C)
+* [AE-ADT7410](http://akizukidenshi.com/catalog/g/gM-06675/)。温度センサ(I2C)
 * NJL7502L 2個、10kΩ抵抗 2個。左右上方の明るさ測定用。
 * CR2032 コイン電池ホルダ
 * 細ピンヘッダ(秋月)。
@@ -27,7 +27,7 @@
 
 配線は行きあたりばったりで作成。
 
-I2Cプルアップ抵抗はADT7410に実装されているものを使用。
+I2Cプルアップ抵抗はAE-ADT7410に実装されているものを使用。
 
 ![回路図](../img/schematic.png)
 

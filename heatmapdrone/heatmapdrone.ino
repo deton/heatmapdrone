@@ -39,16 +39,17 @@ volatile enum FINDLIGHT_STATE findlightState = FS_ONLIGHT;
 volatile uint8_t prevDarker = 0;
 
 const int AMBIENT_DARK_THRESHOLD = 115; // XXX
-const int AMBIENT_LIGHT_THRESHOLD = 200; // XXX
+const int AMBIENT_LIGHT_THRESHOLD = 150; // XXX
 
 const uint16_t PILOT_INTERVAL = 400; // 0: pilot on SENSING_INTERVAL [ms]
 const int8_t FORWARD_VALUE = 30; // [-100,100]
 const int8_t UP_VALUE = 40; // [-100,100]
-const int8_t RIGHT_VALUE = 40; // [-100,100]
+const int8_t RIGHT_VALUE = 50; // [-100,100]
+const int8_t RIGHT_OFFSET = -7; // offset to fix drift on forward for W2E/E2W
 const uint32_t NEARWALL_WAIT = 1500; // wait before turn to reduce drift [ms]
 const uint32_t TURN_WAIT = 800; // wait turn completion [ms]
 const uint32_t ONLIGHT_WAIT = 1500; // wait before turn [ms]
-const uint32_t CHANGEFLY_WAIT = 1000; // wait before changing right/left to avoid no effect [ms]
+const uint32_t CHANGEFLY_WAIT = 800; // wait before changing right/left to avoid no effect [ms]
 
 struct PilotRequest {
   bool land;
@@ -71,7 +72,7 @@ volatile uint32_t onlightMillis = 0; // [ms]
 volatile uint32_t changeFlyWaitMillis = 0; // wait before changing right/left [ms]
 
 /// sensors
-const uint16_t SENSING_INTERVAL = 200; // [ms]
+const uint16_t SENSING_INTERVAL = 100; // [ms]
 
 const uint16_t FRONT_MIN = 2000; // 2m from wall (VL53L0X max sensing 2m)
 const uint16_t UP_MIN = 300; // 30cm from ceiling
@@ -79,7 +80,7 @@ const uint16_t UP_MAX = 800; // 80cm from ceiling
 
 const uint8_t PIN_LIGHTL = A5; // left light sensor NJL7502L
 const uint8_t PIN_LIGHTR = A4; // right light sensor NJL7502L
-const uint8_t PIN_XSHUT = D6;
+const uint8_t PIN_XSHUT = D7;
 const uint8_t TOF_FRONT_NEWADDR = 42; // TOF_UP = 41 (default)
 
 static volatile int8_t triggerSensorPolling = 0;
@@ -413,11 +414,12 @@ bool senseFront(struct PilotRequest *req) {
 // decide left/right movement from left/right light sensor ADC values.
 // trace light like line tracer.
 int8_t decideLeftRightMovement(int left, int right) {
-  if (max(left, right) < 30) { // absolute values are too dark
+  if (max(left, right) < 40) { // absolute values are too dark
     return 0;
   }
   int diff = right - left;
-  if (abs(diff) < right / 10) {
+  //if (abs(diff) < min(left, right) / 10) {
+  if (abs(diff) < 10) {
     return 0;
   }
   if (right > left) { // right is lighter
@@ -555,7 +557,13 @@ void sendPilotRequest(struct PilotRequest *req) {
   keep_vertical_movement = req->vertical_movement;
 
   if (req->force || keep_forward != 0 || keep_right != 0 || keep_vertical_movement != 0) {
-    mambo.fly(keep_right, keep_forward, 0, keep_vertical_movement);
+    int8_t right = keep_right;
+    //if ((pilotState == PS_W2E || pilotState == PS_E2W) && keep_forward != 0) {
+    //if (right <= 0 && keep_forward != 0) {
+    if (keep_forward != 0) {
+      right += RIGHT_OFFSET;
+    }
+    mambo.fly(right, keep_forward, 0, keep_vertical_movement);
     addflylog(keep_forward, keep_right, keep_vertical_movement);
   }
 }
