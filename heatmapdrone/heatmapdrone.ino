@@ -44,12 +44,12 @@ const int AMBIENT_LIGHT_THRESHOLD = 150; // XXX
 const uint16_t PILOT_INTERVAL = 400; // 0: pilot on SENSING_INTERVAL [ms]
 const int8_t FORWARD_VALUE = 30; // [-100,100]
 const int8_t UP_VALUE = 40; // [-100,100]
-const int8_t RIGHT_VALUE = 50; // [-100,100]
+const int8_t RIGHT_VALUE = 35; // [-100,100]
 const int8_t RIGHT_OFFSET = -7; // offset to fix drift on forward for W2E/E2W
-const uint32_t NEARWALL_WAIT = 1500; // wait before turn to reduce drift [ms]
-const uint32_t TURN_WAIT = 800; // wait turn completion [ms]
-const uint32_t ONLIGHT_WAIT = 1500; // wait before turn [ms]
-const uint32_t CHANGEFLY_WAIT = 800; // wait before changing right/left to avoid no effect [ms]
+const uint32_t NEARWALL_WAIT = 1200; // wait before turn to reduce drift [ms]
+const uint32_t TURN_WAIT = 1000; // wait turn completion [ms]
+const uint32_t ONLIGHT_WAIT = 1200; // wait before turn [ms]
+const uint32_t CHANGEFLY_WAIT = 1000; // wait before changing right/left to avoid no effect [ms]
 
 struct PilotRequest {
   bool land;
@@ -65,6 +65,7 @@ volatile bool keep_land = false;
 volatile int8_t keep_forward = 0; // continue sending fly forward
 volatile int8_t keep_right = 0;
 volatile int8_t keep_vertical_movement = 0;
+volatile int8_t prev_keep_right = 0;
 
 volatile uint32_t nearWallMillis = 0; // [ms]
 volatile uint32_t reqTurnMillis = 0; // turn start time [ms]
@@ -415,20 +416,23 @@ bool senseFront(struct PilotRequest *req) {
 // trace light like line tracer.
 int8_t decideLeftRightMovement(int left, int right) {
   if (max(left, right) < 40) { // absolute values are too dark
-    return 0;
+    return prev_keep_right;
   }
   int diff = right - left;
   //if (abs(diff) < min(left, right) / 10) {
   if (abs(diff) < 10) {
+    if (isDarker(max(left, right))) {
+      return prev_keep_right;
+    }
+    prev_keep_right = 0;
     return 0;
   }
+  prev_keep_right = 0;
   if (right > left) { // right is lighter
     return RIGHT_VALUE; // move right
   }
-  if (right < left) { // left is lighter
-    return -RIGHT_VALUE; // move left
-  }
-  return 0;
+  // left is lighter
+  return -RIGHT_VALUE; // move left
 }
 
 bool senseForPilot(struct PilotRequest *req) {
@@ -523,6 +527,7 @@ void sendPilotRequest(struct PilotRequest *req) {
     keep_forward = 0;
     keep_right = 0;
     keep_vertical_movement = 0;
+    prev_keep_right = 0;
     mambo.turn_degrees(req->turn);
     addlog(LT_TURN, req->turn);
     reqTurnMillis = millis();
@@ -549,6 +554,7 @@ void sendPilotRequest(struct PilotRequest *req) {
       changeFlyWaitMillis = millis();
       req->forward = 0; // stop forward
       req->right = 0; // avoid forward by right value
+      prev_keep_right = keep_right;
     }
   }
 
