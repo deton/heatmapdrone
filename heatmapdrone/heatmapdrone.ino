@@ -31,12 +31,6 @@ enum PILOT_STATE {
 };
 volatile enum PILOT_STATE pilotState = PS_INIT;
 
-// substate for tracing ceiling light on PS_WEST/EAST state
-enum TRACELIGHT_STATE {
-  TS_ONLIGHT, TS_TORIGHT, TS_TOLEFT
-};
-volatile enum TRACELIGHT_STATE traceState = TS_ONLIGHT;
-
 // substate for finding ceiling light on PS_W2E/E2W state
 enum FINDLIGHT_STATE {
   FS_LEAVING_LIGHT, FS_APPROACHING_LIGHT, FS_ONLIGHT_WAIT, FS_ONLIGHT
@@ -52,10 +46,10 @@ const int8_t FORWARD_VALUE = 30; // [-100,100]
 const int8_t UP_VALUE = 40; // [-100,100]
 const int8_t RIGHT_VALUE = 35; // [-100,100]
 const int8_t RIGHT_OFFSET = -7; // offset to fix drift on forward for W2E/E2W
-const uint32_t NEARWALL_WAIT = 1300; // wait before turn to reduce drift [ms]
+const uint32_t NEARWALL_WAIT = 1200; // wait before turn to reduce drift [ms]
 const uint32_t TURN_WAIT = 1000; // wait turn completion [ms]
-const uint32_t ONLIGHT_WAIT = 1300; // wait before turn [ms]
-const uint32_t CHANGEFLY_WAIT = 1200; // wait before changing right/left to avoid no effect [ms]
+const uint32_t ONLIGHT_WAIT = 1200; // wait before turn [ms]
+const uint32_t CHANGEFLY_WAIT = 1000; // wait before changing right/left to avoid no effect [ms]
 
 struct PilotRequest {
   bool land;
@@ -421,14 +415,13 @@ bool senseFront(struct PilotRequest *req) {
 // decide left/right movement from left/right light sensor ADC values.
 // trace light like line tracer.
 int8_t decideLeftRightMovement(int left, int right) {
-  int x = max(left, right);
-  if (x < 40) { // absolute values are too dark
+  if (max(left, right) < 40) { // absolute values are too dark
     return prev_keep_right;
   }
   int diff = right - left;
   //if (abs(diff) < min(left, right) / 10) {
-  if (abs(diff) < 10 || isLighter(x) && abs(diff) < min(left, right) / 20) {
-    if (isDarker(x)) {
+  if (abs(diff) < 10) {
+    if (isDarker(max(left, right))) {
       return prev_keep_right;
     }
     prev_keep_right = 0;
@@ -490,47 +483,7 @@ bool senseForPilot(struct PilotRequest *req) {
       // PS_WEST/EAST: trace light line
       req->right = decideLeftRightMovement(lightl, lightr);
       if (req->right != 0) {
-        if (traceState == TS_ONLIGHT) {
-          if (isDarker(min(lightl, lightr))) {
-            req->forward = 0; // fly only right/left
-            traceState = req->right > 0 ? TS_TORIGHT : TS_TOLEFT;
-          }
-        } else if (traceState == TS_TORIGHT) {
-          if (isLighter(min(lightl, lightr))) {
-            traceState = TS_ONLIGHT;
-          } else if (req->right > 0) {
-            req->forward = 0; // fly only right
-          } else { // req is move left
-            traceState = TS_ONLIGHT; // stop move to right
-          }
-        } else if (traceState == TS_TOLEFT) {
-          if (isLighter(min(lightl, lightr))) {
-            traceState = TS_ONLIGHT;
-          } else if (req->right < 0) {
-            req->forward = 0; // fly only left
-          } else { // req is move right
-            traceState = TS_ONLIGHT; // stop move to left
-          }
-        }
         return true;
-      } else {
-        if (traceState == TS_TORIGHT) {
-          if (isLighter(min(lightl,lightr))) {
-            traceState = TS_ONLIGHT;
-          } else {
-            req->right = RIGHT_VALUE; // move right
-            req->forward = 0; // fly only right/left
-            return true;
-          }
-        } else if (traceState == TS_TOLEFT) {
-          if (isLighter(min(lightl,lightr))) {
-            traceState = TS_ONLIGHT;
-          } else {
-            req->right = -RIGHT_VALUE; // move left
-            req->forward = 0; // fly only right/left
-            return true;
-          }
-        }
       }
     }
   }
@@ -586,8 +539,6 @@ void sendPilotRequest(struct PilotRequest *req) {
         if (pilotState == PS_W2E || pilotState == PS_E2W) {
           Serial.println("leaving_light ");
           findlightState = FS_LEAVING_LIGHT;
-        } else if (pilotState == PS_WEST || pilotState == PS_EAST) {
-          traceState = TS_ONLIGHT;
         }
     }
     return;
@@ -599,8 +550,7 @@ void sendPilotRequest(struct PilotRequest *req) {
     }
     changeFlyWaitMillis = 0;
   } else {
-    //if (req->right != 0 && req->right != keep_right) {
-    if (req->right != keep_right) {
+    if (req->right != 0 && req->right != keep_right) {
       changeFlyWaitMillis = millis();
       req->forward = 0; // stop forward
       req->right = 0; // avoid forward by right value
