@@ -47,7 +47,7 @@ const int8_t UP_VALUE = 40; // [-100,100]
 const int8_t RIGHT_VALUE = 35; // [-100,100]
 const int8_t RIGHT_OFFSET = -7; // offset to fix drift on forward for W2E/E2W
 const uint32_t NEARWALL_WAIT = 1500; // wait before turn to reduce drift [ms]
-const uint32_t TURN_WAIT = 1100; // wait turn completion [ms]
+const uint32_t TURN_WAIT = 1400; // wait turn completion [ms]
 const uint32_t ONLIGHT_WAIT = 1300; // wait before turn [ms]
 const uint32_t CHANGEFLY_WAIT = 1100; // wait before changing right/left to avoid no effect [ms]
 
@@ -75,7 +75,7 @@ volatile uint32_t changeFlyWaitMillis = 0; // wait before changing right/left [m
 const uint16_t SENSING_INTERVAL = 100; // [ms]
 
 const uint16_t FRONT_MIN = 2000; // 2m from wall (VL53L0X max sensing 2m)
-const uint16_t UP_MIN = 300; // 30cm from ceiling
+const uint16_t UP_MIN = 400; // 40cm from ceiling
 const uint16_t UP_MAX = 900; // 90cm from ceiling
 
 const uint8_t PIN_LIGHTL = A5; // left light sensor NJL7502L
@@ -571,10 +571,15 @@ void sendPilotRequest(struct PilotRequest *req) {
 
   if (req->force || keep_forward != 0 || keep_right != 0 || keep_vertical_movement != 0) {
     int8_t right = keep_right;
-    //if ((pilotState == PS_W2E || pilotState == PS_E2W) && keep_forward != 0) {
     //if (right <= 0 && keep_forward != 0) {
     if (keep_forward != 0) {
       right += RIGHT_OFFSET;
+      // add more offset to avoid bump to the wall
+      if (pilotState == PS_W2E) {
+        right += 17;
+      } else if (pilotState == PS_E2W) {
+        right += -17 + RIGHT_OFFSET;
+      }
     }
     mambo.fly(right, keep_forward, 0, keep_vertical_movement);
     addflylog(keep_forward, keep_right, keep_vertical_movement);
