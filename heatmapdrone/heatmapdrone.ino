@@ -75,7 +75,7 @@ volatile uint32_t changeFlyWaitMillis = 0; // wait before changing right/left [m
 const uint16_t SENSING_INTERVAL = 100; // [ms]
 
 const uint16_t FRONT_MIN = 2000; // 2m from wall (VL53L0X max sensing 2m)
-const uint16_t UP_MIN = 400; // 40cm from ceiling
+const uint16_t UP_MIN = 450; // 45cm from ceiling
 const uint16_t UP_MAX = 900; // 90cm from ceiling
 
 const uint8_t PIN_LIGHTL = A5; // left light sensor NJL7502L
@@ -423,6 +423,10 @@ int8_t decideLeftRightMovement(int left, int right) {
   if (abs(diff) < 10) {
     return 0;
   }
+  // ignore small diff on lighter
+  if (min(left, right) > 200 && abs(diff) < 70) {
+    return 0;
+  }
   if (right > left) { // right is lighter
     return RIGHT_VALUE; // move right
   }
@@ -557,8 +561,8 @@ void sendPilotRequest(struct PilotRequest *req) {
       req->right = (req->right > 0) ? 80 : -80;
     }
   } else {
-    //if (req->right != 0 && !isSameRightLeft(req->right, keep_right)) {
-    if (!isSameRightLeft(req->right, keep_right)) {
+    if (req->right != 0 && !isSameRightLeft(req->right, keep_right)) {
+    //if (!isSameRightLeft(req->right, keep_right)) {
       changeFlyWaitMillis = millis();
       req->forward = 0; // stop forward
       req->right = 0; // avoid forward by right value
