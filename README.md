@@ -8,6 +8,8 @@
 ライントレーサ同様に、天井の蛍光灯の明るさをトレースして飛行。
 (カメラ等を使ったSLAM(Simultaneous Localization and Mapping)でなく)
 
+[YouTube動画](https://youtu.be/_vcPRaGH0mY)、[ニコニコ動画](http://www.nicovideo.jp/watch/sm33601407)
+
 ![写真](../img/onmambo.jpg)
 
 [結果例](sampleresult.csv):
